@@ -1,0 +1,50 @@
+name: Sync Check
+
+on:
+  workflow_dispatch: # 手動実行のみ（テスト用）
+
+env:
+  # 【設定箇所】ここに同期元のリポジトリを「ユーザー名/リポジトリ名」で書いてください
+  SOURCE_REPO: "owner-name/private-repo-name"
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # タグ比較のために履歴を全取得
+
+      - name: Check for new release
+        id: check
+        run: |
+          echo "--- Start checking for updates ---"
+          
+          # 1. リモート（同期元）の最新タグを取得
+          # git ls-remote を使って、Secretのトークン経由でタグリストを取得します
+          GIT_CMD="git ls-remote --tags --sort='v:refname' https://${{ secrets.API_TOKEN_GITHUB }}@github.com/${SOURCE_REPO}.git"
+          
+          echo "Fetching tags from remote..."
+          REMOTE_TAGS=$($GIT_CMD | tail -n 1 | awk -F/ '{print $3}')
+          
+          if [ -z "$REMOTE_TAGS" ]; then
+            echo "Error: Could not fetch tags from remote source. Check repository name and token permissions."
+            exit 1
+          fi
+          
+          echo "Latest Remote Tag: $REMOTE_TAGS"
+          
+          # 2. ローカル（自分のリポジトリ）の最新タグを取得
+          # まだタグがない場合は "none" とします
+          LOCAL_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          echo "Current Local Tag: $LOCAL_TAG"
+          
+          # 3. 比較判定
+          if [ "$REMOTE_TAGS" != "$LOCAL_TAG" ]; then
+            echo "Result: UPDATE_AVAILABLE=true"
+            echo "New version found! ($REMOTE_TAGS)"
+          else
+            echo "Result: UPDATE_AVAILABLE=false"
+            echo "Already up to date."
+          fi
