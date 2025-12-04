@@ -1,0 +1,150 @@
+name: Auto Build & Release from Latest Tag
+
+permissions:
+  contents: write # リリース作成とタグ打ちに必要
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 1時間ごとに実行
+  workflow_dispatch:    # 手動実行用
+
+jobs:
+  check-build-release:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: YuzuMikan404/PrtivateLIMEs
+      MY_PAT: ${{ secrets.PAT }}
+      # 変更後のパッケージ名
+      NEW_PKG: "io.github.fork.lime"
+      NEW_LINE_PKG: "jp.naver.line.android.clone"
+
+    steps:
+      - name: Checkout Local Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+
+      - name: Check for New Tag
+        id: check
+        run: |
+          echo "--- Checking for updates ---"
+          
+          # 1. Privateリポジトリの最新タグを取得
+          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
+          REMOTE_OUTPUT=$(git ls-remote --tags --sort=v:refname "$AUTH_URL" 2>&1)
+          
+          # 最新のタグ名を取得 (例: v1.0.2)
+          LATEST_TAG=$(echo "$REMOTE_OUTPUT" | tail -n 1 | awk -F/ '{print $3}')
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No tags found in remote."
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "Latest Remote Tag: $LATEST_TAG"
+          
+          # 2. 自分のリポジトリの最新タグを取得
+          CURRENT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          echo "Current Local Tag: $CURRENT_TAG"
+          
+          # 3. 比較 (リモートのタグが自分になければ更新あり)
+          if [ "$LATEST_TAG" != "$CURRENT_TAG" ]; then
+            echo "New version detected!"
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+            echo "TARGET_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          else
+            echo "Already up to date."
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Fetch & Checkout Upstream Tag
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "--- Fetching source code for tag: $TARGET_TAG ---"
+          
+          # git configの設定 (タグを打つために必要)
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Privateリポジトリをリモートとして追加
+          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
+          
+          # 全タグを取得
+          git fetch upstream --tags
+          
+          # ターゲットのタグにチェックアウト (強制的にソースコードをその時点のものにする)
+          # これで「メインブランチ」ではなく「そのタグのバージョン」になります
+          git checkout refs/tags/$TARGET_TAG
+
+      - name: Refactor Package Names
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "--- Refactoring Package Names ---"
+          
+          OLD_PKG="io.github.hiro.lime"
+          # NEW_PKG は env で定義済み
+          
+          OLD_LINE="jp.naver.line.android"
+          # NEW_LINE_PKG は env で定義済み
+          
+          echo "Replacing $OLD_PKG -> $NEW_PKG"
+          echo "Replacing $OLD_LINE -> $NEW_LINE_PKG"
+          
+          # 1. 文字列置換
+          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_PKG/$NEW_PKG/g" {} +
+          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_LINE/$NEW_LINE_PKG/g" {} +
+          
+          # 2. フォルダ構造の移動
+          TARGET_DIRS=$(find . -type d -path "*/io/github/hiro/lime")
+          
+          for DIR in $TARGET_DIRS; do
+            echo "Moving directory: $DIR"
+            PARENT_DIR=$(dirname "$DIR") # .../io/github/hiro
+            BASE_DIR=$(dirname "$PARENT_DIR") # .../io/github
+            
+            mkdir -p "$BASE_DIR/fork"
+            mv "$DIR" "$BASE_DIR/fork/lime"
+            rmdir "$PARENT_DIR" || true
+          done
+          
+          echo "Refactoring complete."
+
+      - name: Setup Java
+        if: env.UPDATE_NEEDED == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17' # Androidビルド用 (必要に応じて11や21に変更)
+
+      - name: Build APK
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          chmod +x gradlew
+          # Releaseビルドを作成 (署名鍵がない場合、unsigned APKができるか、設定によっては失敗します)
+          # もし署名なしでエラーになる場合は assembleDebug に変更してください
+          ./gradlew assembleRelease
+
+      - name: Create Release & Upload APK
+        if: env.UPDATE_NEEDED == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TARGET_TAG }}
+          name: Release ${{ env.TARGET_TAG }}
+          body: "Auto-generated release from upstream tag: ${{ env.TARGET_TAG }}"
+          draft: false
+          prerelease: false
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync Tag to Local Repo
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          # リリース成功後、自分のリポジトリにも同じタグを打つ
+          # これにより、次回チェック時に「すでに持っている」と判定されます
+          git tag -f $TARGET_TAG
+          git push origin $TARGET_TAG
