@@ -4,7 +4,7 @@ on:
   workflow_dispatch: # 手動実行のみ
 
 env:
-  # 修正済み: PrtivateLIMEs (tが入っている正しい名前に変更)
+  # 【確認】スペルはこれで合っていますか？間違っていたら修正してください
   SOURCE_REPO: "areteruhiro/PrtivateLIMEs"
 
 jobs:
@@ -14,40 +14,41 @@ jobs:
       - name: Checkout destination repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # タグ比較のために履歴を全取得
+          fetch-depth: 0
 
       - name: Check for new release
         id: check
         run: |
           echo "--- Start checking for updates ---"
           
-          # 1. リモート（同期元）の最新タグを取得
-          GIT_CMD="git ls-remote --tags --sort='v:refname' https://${{ secrets.API_TOKEN_GITHUB }}@github.com/${SOURCE_REPO}.git"
+          # URLの形式を変更: ユーザー名に 'x-access-token' を指定する形式に変更
+          # これにより認証がより安定することがあります
+          GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${{ secrets.API_TOKEN_GITHUB }}@github.com/${SOURCE_REPO}.git"
           
           echo "Fetching tags from remote ($SOURCE_REPO)..."
           
-          # エラーハンドリング
           if ! REMOTE_OUTPUT=$($GIT_CMD 2>&1); then
-             echo "::error::Failed to access remote repository. Error details:"
-             echo "$REMOTE_OUTPUT"
-             echo "Hints: 1. Check if SOURCE_REPO is correct. 2. Check if API_TOKEN_GITHUB has 'repo' scope."
+             echo "::error::Failed to access remote repository."
+             echo "Error message: $REMOTE_OUTPUT"
+             echo "--- TROUBLESHOOTING ---"
+             echo "1. Has YuzuMikan404 accepted the invitation from areteruhiro? (Check email/notifications)"
+             echo "2. Is the repository name '$SOURCE_REPO' 100% correct? (Check spelling)"
+             echo "3. Is the secret 'API_TOKEN_GITHUB' updated with a new token having 'repo' scope?"
              exit 1
           fi
           
           REMOTE_TAGS=$(echo "$REMOTE_OUTPUT" | tail -n 1 | awk -F/ '{print $3}')
           
           if [ -z "$REMOTE_TAGS" ]; then
-            echo "Warning: No tags found in remote repository. Assuming initial run or empty repo."
+            echo "Warning: No tags found (or empty repo)."
             REMOTE_TAGS="none"
           fi
           
           echo "Latest Remote Tag: $REMOTE_TAGS"
           
-          # 2. ローカル（自分のリポジトリ）の最新タグを取得
           LOCAL_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
           echo "Current Local Tag: $LOCAL_TAG"
           
-          # 3. 比較判定
           if [ "$REMOTE_TAGS" != "none" ] && [ "$REMOTE_TAGS" != "$LOCAL_TAG" ]; then
             echo "Result: UPDATE_AVAILABLE=true"
             echo "New version found! ($REMOTE_TAGS)"
