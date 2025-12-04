@@ -1,22 +1,19 @@
 name: Daily Build from Main Branch
 
 permissions:
-  contents: write # リリース作成とタグ打ちに必須
+  contents: write
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 毎日 00:00 (UTC) = 日本時間 09:00 に実行
-  workflow_dispatch:    # 手動実行用
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   check-and-build:
     runs-on: ubuntu-latest
     env:
-      # スペルミスありのリポジトリ名で固定
       SOURCE_REPO: YuzuMikan404/PrtivateLIMEs
       MY_PAT: ${{ secrets.PAT }}
-      
-      # 変更後のパッケージ設定
       NEW_PKG: "io.github.fork.lime"
       NEW_LINE_PKG: "jp.naver.line.android.clone"
 
@@ -31,27 +28,20 @@ jobs:
         id: check
         run: |
           echo "--- Checking Upstream Main Branch ---"
-          
-          # 1. Privateリポジトリのmainブランチの最新コミットハッシュを取得
           AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
-          
-          # HEAD (最新コミット) のハッシュを取得
           UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
           
           if [ -z "$UPSTREAM_SHA" ]; then
-            echo "::error::Failed to get upstream SHA. Check PAT or Repo name."
+            echo "::error::Failed to get upstream SHA."
             exit 1
           fi
           
-          # 短いハッシュ (7文字) を作成
           SHORT_SHA=${UPSTREAM_SHA:0:7}
-          
-          echo "Upstream Latest Commit: $SHORT_SHA"
-          
-          # 2. このコミットを既にビルド済みかチェック
-          # "build-xxxxxxx" というタグが既にローカルにあるか確認
           TARGET_TAG="build-$SHORT_SHA"
           
+          echo "Upstream Latest: $SHORT_SHA"
+          
+          # タグの存在チェック
           if git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
             echo "::notice::Build for commit $SHORT_SHA already exists. Skipping."
             echo "BUILD_NEEDED=false" >> $GITHUB_ENV
@@ -66,39 +56,29 @@ jobs:
       - name: Fetch & Checkout Upstream Code
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "--- Fetching source code for commit: $SHORT_SHA ---"
-          
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
           git fetch upstream
-          
-          # 最新コミットの状態へ強制チェックアウト
           git checkout $UPSTREAM_SHA
 
       - name: Refactor Package Names
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "--- Refactoring Package Names ---"
           OLD_PKG="io.github.hiro.lime"
           OLD_LINE="jp.naver.line.android"
           
-          # 1. 文字列置換
           find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_PKG/$NEW_PKG/g" {} +
           find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_LINE/$NEW_LINE_PKG/g" {} +
           
-          # 2. フォルダ移動
           TARGET_DIRS=$(find . -type d -path "*/io/github/hiro/lime")
           for DIR in $TARGET_DIRS; do
-            echo "Moving $DIR"
             PARENT_DIR=$(dirname "$DIR")
             BASE_DIR=$(dirname "$PARENT_DIR")
             mkdir -p "$BASE_DIR/fork"
             mv "$DIR" "$BASE_DIR/fork/lime"
             rmdir "$PARENT_DIR" || true
           done
-          echo "Refactoring complete."
 
       - name: Setup Java
         if: env.BUILD_NEEDED == 'true'
@@ -111,14 +91,12 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         run: |
           chmod +x gradlew
-          # リリースビルド（失敗時はデバッグビルド）
           ./gradlew assembleRelease || ./gradlew assembleDebug
 
       - name: Create Release
         if: env.BUILD_NEEDED == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          # リリース名を "Build-コミットハッシュ" にする
           tag_name: ${{ env.TARGET_TAG }}
           name: Build ${{ env.SHORT_SHA }}
           body: |
@@ -131,11 +109,6 @@ jobs:
             app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      # 最後にタグを打って、次回重複しないようにする
-      - name: Mark as Built
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          # Checkoutしてdetached HEADになっているため、タグをPushするための特殊処理
-          # 元のリポジトリ(origin)に対してタグをプッシュする
-          git push origin $UPSTREAM_SHA:refs/tags/$TARGET_TAG
+          
+      # 【修正点】最後の git push 手順を削除しました。
+      # action-gh-release が自動でタグを作るので、重複エラーを防げます。
