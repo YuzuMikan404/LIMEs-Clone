@@ -4,8 +4,8 @@ on:
   workflow_dispatch: # 手動実行のみ
 
 env:
-  # 1. ワークフロー全体で SOURCE_REPO を定義
-  SOURCE_REPO: "areteruhiro/PrtivateLIMEs" # 【重要】スペルを Prtivate から Private に修正することを強く推奨します
+  # 【修正点】ソースリポジトリを YuzuMikan404 のフォークリポジトリに変更
+  SOURCE_REPO: "YuzuMikan404/PrtivateLIMEs"
 
 jobs:
   check-update:
@@ -18,27 +18,30 @@ jobs:
 
       - name: Check for new release
         id: check
-        # 2. ここでシークレットをステップの環境変数として定義する
+        # 【修正点】シークレットを環境変数として渡す
         env:
           GITHUB_TOKEN: ${{ secrets.API_TOKEN_GITHUB }} 
-          # 環境変数名は何でも良いですが、ここでは GITHUB_TOKEN とします
           
         run: |
           echo "--- Start checking for updates ---"
           
-          # 3. シェルスクリプト内で、定義した環境変数 ($GITHUB_TOKEN) を使用する
-          # シークレットの値はログに出力されないようにマスキングされます
+          # Gitコマンドで認証情報付きのURLを使用 (環境変数 $GITHUB_TOKEN を利用)
           GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${GITHUB_TOKEN}@github.com/${SOURCE_REPO}.git"
           
           echo "Fetching tags from remote ($SOURCE_REPO)..."
           
           if ! REMOTE_OUTPUT=$($GIT_CMD 2>&1); then
-             # ... (後略：エラー処理は変更なし) ...
-             
-             # ... 変更なし ...
+             echo "::error::Failed to access remote repository."
+             # エラーメッセージをログに出力
+             echo "Error message: $REMOTE_OUTPUT" 
+             echo "--- TROUBLESHOOTING ---"
+             echo "1. Has YuzuMikan404 accepted the invitation from areteruhiro? (現在は使用しませんが残します)"
+             echo "2. Is the repository name '$SOURCE_REPO' 100% correct? (現在は YuzuMikan404/PrtivateLIMEs です)"
+             echo "3. Is the secret 'API_TOKEN_GITHUB' updated with a new token having 'repo' scope?"
              exit 1
           fi
           
+          # タグの抽出ロジック
           REMOTE_TAGS=$(echo "$REMOTE_OUTPUT" | tail -n 1 | awk -F/ '{print $3}')
           
           if [ -z "$REMOTE_TAGS" ]; then
@@ -48,9 +51,11 @@ jobs:
           
           echo "Latest Remote Tag: $REMOTE_TAGS"
           
+          # ローカルタグの取得
           LOCAL_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
           echo "Current Local Tag: $LOCAL_TAG"
           
+          # 更新の有無を判定
           if [ "$REMOTE_TAGS" != "none" ] && [ "$REMOTE_TAGS" != "$LOCAL_TAG" ]; then
             echo "Result: UPDATE_AVAILABLE=true"
             echo "New version found! ($REMOTE_TAGS)"
