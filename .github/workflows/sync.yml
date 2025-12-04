@@ -1,70 +1,76 @@
 name: Sync Check
 
-on:
-  workflow_dispatch: # 手動実行のみ
+permissions:
+  contents: write # 念のため書き込み権限も明示
 
-env:
-  # 【最終確認】ターゲットリポジトリ: YuzuMikan404 のフォークリポジトリ
-  SOURCE_REPO: "YuzuMikan404/PrtivateLIMEs"
+on:
+  schedule:
+    - cron: '0 0 * * *' # 毎日実行など（必要に応じて変更）
+  workflow_dispatch: # 手動実行用
 
 jobs:
   check-update:
     runs-on: ubuntu-latest
-    # Gitコマンドの実行に必要なシークレットをステップの環境変数として定義
     env:
-      GITHUB_TOKEN: ${{ secrets.API_TOKEN_GITHUB }} 
+      # 正しいリポジトリ名 (スペルはPrtivateで正解)
+      SOURCE_REPO: YuzuMikan404/PrtivateLIMEs
+      # 【重要】ここを secrets.GITHUB_TOKEN から secrets.PAT に変更します
+      MY_PAT: ${{ secrets.PAT }}
 
     steps:
-      - name: Checkout destination repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Checkout自体もPATを使って行うことで、サブモジュール等がある場合も安心です
+          token: ${{ secrets.PAT }}
 
-      - name: Check for new release
-        id: check
+      - name: Check for updates
         run: |
-          echo "--- Start checking for updates (Debugging Enabled) ---"
+          echo "--- Start checking for updates ---"
           
-          # 環境変数からトークンを取得し、認証付きのURLを構築
-          GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${GITHUB_TOKEN}@github.com/${SOURCE_REPO}.git"
+          # 注意: トークンが無い場合はエラーにする
+          if [ -z "$MY_PAT" ]; then
+            echo "::error::Secret 'PAT' is not set. Please add it to Repository Secrets."
+            exit 1
+          fi
+
+          # PATを使って認証付きURLを作成
+          # x-access-token というユーザー名を使うのがGitHub推奨の認証方式です
+          GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
           
           echo "Fetching tags from remote ($SOURCE_REPO)..."
           
-          # --- デバッグ用情報 ---
-          echo "Debug: Git command to be executed (token is masked):"
-          echo "git ls-remote --tags --sort='v:refname' https://x-access-token:***@github.com/${SOURCE_REPO}.git"
-          
-          # Gitコマンドを実行し、エラーが発生した場合は詳細を出力して終了
+          # コマンド実行（エラー時は詳細を表示）
           if ! REMOTE_OUTPUT=$($GIT_CMD 2>&1); then
              echo "::error::Failed to access remote repository."
              echo "--- Error Details ---"
-             echo "Executed Command was: $GIT_CMD" # トークンは自動でマスキングされます
-             echo "Error message from Git (REMOTE_OUTPUT):"
-             echo "$REMOTE_OUTPUT" # <-- 最も重要なエラーメッセージ
+             echo "Message: $REMOTE_OUTPUT"
              echo "--- TROUBLESHOOTING ---"
-             echo "1. Is the repository name '$SOURCE_REPO' 100% correct? (YuzuMikan404/PrtivateLIMEs)"
-             echo "2. Is the secret 'API_TOKEN_GITHUB' valid, not expired, and has 'repo' scope?"
+             echo "The repository name '$SOURCE_REPO' is correct."
+             echo "However, access was denied."
+             echo "Please check if your 'PAT' secret has the 'repo' scope checked in GitHub settings."
              exit 1
           fi
-          
-          # 以降、タグの抽出と比較ロジック
+
+          # 成功した場合、最新タグを取得
           REMOTE_TAGS=$(echo "$REMOTE_OUTPUT" | tail -n 1 | awk -F/ '{print $3}')
           
           if [ -z "$REMOTE_TAGS" ]; then
-            echo "Warning: No tags found (or empty repo)."
-            REMOTE_TAGS="none"
+             REMOTE_TAGS="none"
           fi
           
           echo "Latest Remote Tag: $REMOTE_TAGS"
           
-          # ローカルタグの取得
+          # ローカルタグ取得
           LOCAL_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
           echo "Current Local Tag: $LOCAL_TAG"
           
+          # 比較ロジック
           if [ "$REMOTE_TAGS" != "none" ] && [ "$REMOTE_TAGS" != "$LOCAL_TAG" ]; then
-            echo "Result: UPDATE_AVAILABLE=true"
+            echo "UPDATE_AVAILABLE=true" >> $GITHUB_ENV
             echo "New version found! ($REMOTE_TAGS)"
           else
-            echo "Result: UPDATE_AVAILABLE=false"
+            echo "UPDATE_AVAILABLE=false" >> $GITHUB_ENV
             echo "Already up to date."
           fi
