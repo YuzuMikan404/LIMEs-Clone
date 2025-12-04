@@ -4,12 +4,16 @@ on:
   workflow_dispatch: # 手動実行のみ
 
 env:
-  # 【修正点】ソースリポジトリを YuzuMikan404 のフォークリポジトリに変更
+  # 【最終確認】ターゲットリポジトリ: YuzuMikan404 のフォークリポジトリ
   SOURCE_REPO: "YuzuMikan404/PrtivateLIMEs"
 
 jobs:
   check-update:
     runs-on: ubuntu-latest
+    # Gitコマンドの実行に必要なシークレットをステップの環境変数として定義
+    env:
+      GITHUB_TOKEN: ${{ secrets.API_TOKEN_GITHUB }} 
+
     steps:
       - name: Checkout destination repository
         uses: actions/checkout@v4
@@ -18,30 +22,32 @@ jobs:
 
       - name: Check for new release
         id: check
-        # 【修正点】シークレットを環境変数として渡す
-        env:
-          GITHUB_TOKEN: ${{ secrets.API_TOKEN_GITHUB }} 
-          
         run: |
-          echo "--- Start checking for updates ---"
+          echo "--- Start checking for updates (Debugging Enabled) ---"
           
-          # Gitコマンドで認証情報付きのURLを使用 (環境変数 $GITHUB_TOKEN を利用)
+          # 環境変数からトークンを取得し、認証付きのURLを構築
           GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${GITHUB_TOKEN}@github.com/${SOURCE_REPO}.git"
           
           echo "Fetching tags from remote ($SOURCE_REPO)..."
           
+          # --- デバッグ用情報 ---
+          echo "Debug: Git command to be executed (token is masked):"
+          echo "git ls-remote --tags --sort='v:refname' https://x-access-token:***@github.com/${SOURCE_REPO}.git"
+          
+          # Gitコマンドを実行し、エラーが発生した場合は詳細を出力して終了
           if ! REMOTE_OUTPUT=$($GIT_CMD 2>&1); then
              echo "::error::Failed to access remote repository."
-             # エラーメッセージをログに出力
-             echo "Error message: $REMOTE_OUTPUT" 
+             echo "--- Error Details ---"
+             echo "Executed Command was: $GIT_CMD" # トークンは自動でマスキングされます
+             echo "Error message from Git (REMOTE_OUTPUT):"
+             echo "$REMOTE_OUTPUT" # <-- 最も重要なエラーメッセージ
              echo "--- TROUBLESHOOTING ---"
-             echo "1. Has YuzuMikan404 accepted the invitation from areteruhiro? (現在は使用しませんが残します)"
-             echo "2. Is the repository name '$SOURCE_REPO' 100% correct? (現在は YuzuMikan404/PrtivateLIMEs です)"
-             echo "3. Is the secret 'API_TOKEN_GITHUB' updated with a new token having 'repo' scope?"
+             echo "1. Is the repository name '$SOURCE_REPO' 100% correct? (YuzuMikan404/PrtivateLIMEs)"
+             echo "2. Is the secret 'API_TOKEN_GITHUB' valid, not expired, and has 'repo' scope?"
              exit 1
           fi
           
-          # タグの抽出ロジック
+          # 以降、タグの抽出と比較ロジック
           REMOTE_TAGS=$(echo "$REMOTE_OUTPUT" | tail -n 1 | awk -F/ '{print $3}')
           
           if [ -z "$REMOTE_TAGS" ]; then
@@ -55,7 +61,6 @@ jobs:
           LOCAL_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
           echo "Current Local Tag: $LOCAL_TAG"
           
-          # 更新の有無を判定
           if [ "$REMOTE_TAGS" != "none" ] && [ "$REMOTE_TAGS" != "$LOCAL_TAG" ]; then
             echo "Result: UPDATE_AVAILABLE=true"
             echo "New version found! ($REMOTE_TAGS)"
