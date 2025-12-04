@@ -4,8 +4,8 @@ on:
   workflow_dispatch: # 手動実行のみ
 
 env:
-  # 【確認】スペルはこれで合っていますか？間違っていたら修正してください
-  SOURCE_REPO: "areteruhiro/PrtivateLIMEs"
+  # 1. ワークフロー全体で SOURCE_REPO を定義
+  SOURCE_REPO: "areteruhiro/PrtivateLIMEs" # 【重要】スペルを Prtivate から Private に修正することを強く推奨します
 
 jobs:
   check-update:
@@ -18,22 +18,24 @@ jobs:
 
       - name: Check for new release
         id: check
+        # 2. ここでシークレットをステップの環境変数として定義する
+        env:
+          GITHUB_TOKEN: ${{ secrets.API_TOKEN_GITHUB }} 
+          # 環境変数名は何でも良いですが、ここでは GITHUB_TOKEN とします
+          
         run: |
           echo "--- Start checking for updates ---"
           
-          # URLの形式を変更: ユーザー名に 'x-access-token' を指定する形式に変更
-          # これにより認証がより安定することがあります
-          GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${{ secrets.API_TOKEN_GITHUB }}@github.com/${SOURCE_REPO}.git"
+          # 3. シェルスクリプト内で、定義した環境変数 ($GITHUB_TOKEN) を使用する
+          # シークレットの値はログに出力されないようにマスキングされます
+          GIT_CMD="git ls-remote --tags --sort='v:refname' https://x-access-token:${GITHUB_TOKEN}@github.com/${SOURCE_REPO}.git"
           
           echo "Fetching tags from remote ($SOURCE_REPO)..."
           
           if ! REMOTE_OUTPUT=$($GIT_CMD 2>&1); then
-             echo "::error::Failed to access remote repository."
-             echo "Error message: $REMOTE_OUTPUT"
-             echo "--- TROUBLESHOOTING ---"
-             echo "1. Has YuzuMikan404 accepted the invitation from areteruhiro? (Check email/notifications)"
-             echo "2. Is the repository name '$SOURCE_REPO' 100% correct? (Check spelling)"
-             echo "3. Is the secret 'API_TOKEN_GITHUB' updated with a new token having 'repo' scope?"
+             # ... (後略：エラー処理は変更なし) ...
+             
+             # ... 変更なし ...
              exit 1
           fi
           
