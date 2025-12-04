@@ -7,7 +7,7 @@ env:
   # 【重要】ここを実際の同期元リポジトリ名に書き換えてください！
   # 形式: "ユーザー名/リポジトリ名"
   # 例: SOURCE_REPO: "hiro/lime-original"
-  SOURCE_REPO: "areteruhiro/PrivateLIMEsを書いてください"
+  SOURCE_REPO: "areteruhiro/PrivateLIMEs"
 
 jobs:
   check-update:
