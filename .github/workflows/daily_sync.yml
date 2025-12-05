@@ -49,8 +49,8 @@ jobs:
     env:
       SOURCE_REPO: areteruhiro/PrtivateLIMEs
       MY_PAT: ${{ secrets.PAT }}
+      # モジュール自体の新しいパッケージ名
       NEW_PKG: "io.github.fork.lime"
-      NEW_LINE_PKG: "jp.naver.line.android.clone"
       APP_NAME: "LIMEs-Neo"
 
     steps:
@@ -267,37 +267,50 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # ステップ12: 基本パッケージ名置換
-      - name: Replace Package Names
+      # ステップ12: パッケージ名とLSPatch用設定の適用（重要）
+      - name: Replace Package Names & Relax Hook Logic
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== 基本パッケージ名置換 ==="
+          echo "=== パッケージ名とフックロジックの調整 ==="
           
+          # 定義
           OLD_PKG="io.github.hiro.lime"
-          OLD_LINE="jp.naver.line.android"
           NEW_PKG="io.github.fork.lime"
-          NEW_LINE_PKG="jp.naver.line.android.clone"
+          TARGET_ORIGINAL="jp.naver.line.android"
+          TARGET_CLONE="jp.naver.line.android.clone"
           
-          echo "置換設定:"
-          echo "  $OLD_PKG → $NEW_PKG"
-          echo "  $OLD_LINE → $NEW_LINE_PKG"
+          echo "1. モジュール自体のパッケージ名を変更 (競合回避)"
+          echo "   $OLD_PKG -> $NEW_PKG"
           
-          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
-            while read file; do
-              sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file"
-              sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file"
-            done
+          # AndroidManifest, Java, Kotlin, Gradle ファイル内のモジュールIDを置換
+          find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
+            ! -path "*/build/*" ! -path "*/.git/*" \
+            -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
+
+          echo "2. LSPatchスコープ設定 (AndroidManifestのみ)"
+          echo "   AndroidManifest.xml 内のターゲットを $TARGET_CLONE に設定"
+          # これにより、LSPatchはこのモジュールがcloneアプリ用であると認識します
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" \
+            -exec sed -i "s|$TARGET_ORIGINAL|$TARGET_CLONE|g" {} +
+
+          echo "3. フック判定ロジックの緩和 (Clone対応)"
+          echo "   ソースコード内のクラス参照(import等)は壊さずに、"
+          echo "   パッケージ名チェック処理だけを clone 対応させます。"
           
-          find . -type f \( -name "*.java" -o -name "*.kt" -o -name "*.xml" -o -name "*.gradle" \) \
-            ! -path "*/build/*" ! -path "*/.git/*" ! -name "AndroidManifest.xml" 2>/dev/null | \
-            while read file; do
-              if [[ -f "$file" ]]; then
-                sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file" 2>/dev/null || true
-                sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file" 2>/dev/null || true
-              fi
-            done
-          
-          echo "基本パッケージ名置換完了"
+          # '== "jp.naver.line.android"' を '.startsWith("jp.naver.line.android")' に変更
+          # これで jp.naver.line.android (公式) も jp.naver.line.android.clone (Clone) も通ります
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+            -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
+            
+          # '!= "jp.naver.line.android"' を '!...startsWith(...)' に変更
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+            -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
+
+          # 念の為、単純な変数比較用 (lpparam.packageName 等)
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+            -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
+
+          echo "✅ 調整完了: ソースコードのクラス参照は維持されました。"
 
       # ステップ13: アプリ名の統一設定
       - name: Unify Application Name
@@ -378,11 +391,13 @@ jobs:
             - **ビルド日時**: ${{ env.BUILD_DATE }} ${{ env.BUILD_TIME }}
             - **ビルド種別**: ${{ env.BUILD_TYPE }}
             - **トリガー**: ${{ env.TRIGGER_TYPE }}
-            - **タグ**: ${{ env.TARGET_TAG }}
             
-            ## 🎯 設定
-            **ターゲットAPK**: `jp.naver.line.android.clone`
-            **モジュール**: `io.github.fork.lime`
+            ## 🎯 LSPatch設定情報
+            - **モジュールパッケージ**: `io.github.fork.lime`
+            - **ターゲットアプリ**: `jp.naver.line.android.clone` (Clone対応版)
+            
+            > **注意**: このモジュールは LSPatch 向けに `jp.naver.line.android.clone` をターゲットとしています。
+            > 内部ロジックは公式・Clone両方のパッケージ名に対応するように修正されています。
             
             ---
             *GitHub Actionsによる自動ビルド*
@@ -405,25 +420,8 @@ jobs:
           
           if [[ "${{ job.status }}" == "success" ]]; then
             echo "✅ ビルド成功！"
-            echo ""
-            echo "📊 サマリー:"
-            echo "- アプリ名: LIMEs-Neo"
-            echo "- ターゲットパッケージ: $NEW_LINE_PKG"
-            echo "- モジュールパッケージ: $NEW_PKG"
-            echo "- ビルドタグ: ${{ env.TARGET_TAG || '未設定' }}"
-            echo "- ビルド日時: ${{ env.BUILD_DATE || '不明' }}"
-            
-            if [[ -n "${{ env.TARGET_TAG }}" ]]; then
-              echo ""
-              echo "🔗 リリースページ:"
-              echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
-            fi
+            echo "ターゲット: jp.naver.line.android.clone"
           else
             echo "❌ ビルド失敗"
-            echo ""
-            echo "🔧 デバッグ情報:"
-            echo "- イベント: ${{ github.event_name }}"
-            echo "- トリガー: ${{ env.TRIGGER_TYPE || '不明' }}"
-            echo "- ワークフロー: ${{ github.workflow }}"
-            echo "- リポジトリ: ${{ github.repository }}"
+            echo "詳細ログを確認してください。"
           fi
