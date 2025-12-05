@@ -21,7 +21,7 @@ jobs:
       MY_PAT: ${{ secrets.PAT }}
       NEW_PKG: "io.github.fork.lime"
       NEW_LINE_PKG: "jp.naver.line.android.clone"
-      APP_NAME: "LIMEs-Neo"  # 変更点: LIMEs-Second → LIMEs-Neo
+      APP_NAME: "LIMEs-Neo"
 
     steps:
       # ステップ1: 現在のリポジトリをチェックアウト
@@ -31,19 +31,35 @@ jobs:
           token: ${{ secrets.PAT }}
           fetch-depth: 0
 
-      # ステップ2: ビルド日時を取得（リリースノート用）
-      - name: Get build datetime
-        id: datetime
+      # ステップ2: 手動実行の場合は即座にビルドを開始（シンプルなロジックに修正）
+      - name: Check Trigger Type
+        id: trigger-check
         run: |
-          echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
-          echo "short_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
-          echo "timestamp=$(date +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+          echo "=== トリガータイプの確認 ==="
+          echo "イベントタイプ: ${{ github.event_name }}"
+          
+          # 手動トリガーの場合は常にビルド
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "::notice::手動トリガーを検出しました。ビルドを開始します。"
+            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
+            echo "BUILD_REASON=手動実行" >> $GITHUB_ENV
+            echo "TRIGGER_TYPE=manual" >> $GITHUB_ENV
+            
+            # 強制再ビルドの設定
+            FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
+            echo "強制再ビルド設定: $FORCE_REBUILD"
+            echo "FORCE_REBUILD=$FORCE_REBUILD" >> $GITHUB_ENV
+          else
+            echo "::notice::スケジュール実行を検出しました。アップストリームをチェックします。"
+            echo "TRIGGER_TYPE=scheduled" >> $GITHUB_ENV
+          fi
 
-      # ステップ3: アップストリームリポジトリの最新コミットを確認
-      - name: Check Upstream Commit & Determine Build Strategy
-        id: check
+      # ステップ3: スケジュール実行の場合のみアップストリームをチェック
+      - name: Check Upstream for Scheduled Runs
+        if: env.TRIGGER_TYPE == 'scheduled'
+        id: check-upstream
         run: |
-          echo "=== アップストリームリポジトリの確認 ==="
+          echo "=== アップストリームリポジトリの確認（スケジュール実行）==="
           AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
           UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
           
@@ -58,66 +74,63 @@ jobs:
           echo "アップストリーム最新コミット: $SHORT_SHA"
           echo "基本タグ名: $BASE_TAG"
           
-          # トリガータイプに応じた戦略
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "::notice::手動トリガーを検出しました。"
-            
-            FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
-            echo "強制再ビルド設定: $FORCE_REBUILD"
-            
-            # リモートに既存タグがあるか確認
-            if git ls-remote --tags origin "refs/tags/$BASE_TAG" >/dev/null 2>&1; then
-              echo "::warning::タグ '$BASE_TAG' はリモートに既に存在します。"
-              
-              if [[ "$FORCE_REBUILD" == "true" ]]; then
-                echo "::notice::強制再ビルドが有効です。既存リリースを上書きします。"
-                TARGET_TAG="$BASE_TAG"
-                TAG_STRATEGY="overwrite"
-              else
-                TIMESTAMP=${{ steps.datetime.outputs.timestamp }}
-                TARGET_TAG="${BASE_TAG}-manual-${TIMESTAMP}"
-                echo "::notice::新しい手動ビルドタグを作成: $TARGET_TAG"
-                TAG_STRATEGY="new"
-              fi
-            else
-              TARGET_TAG="$BASE_TAG"
-              TAG_STRATEGY="new"
-            fi
-            
-            BUILD_REASON="手動実行"
-            if [[ "$FORCE_REBUILD" == "true" ]]; then
-              BUILD_REASON="$BUILD_REASON (強制再ビルド)"
-            fi
-            
+          # 既存タグをチェック
+          if git ls-remote --tags origin "refs/tags/$BASE_TAG" >/dev/null 2>&1; then
+            echo "::notice::コミット $SHORT_SHA のビルドは既に存在します。スキップします。"
+            echo "BUILD_NEEDED=false" >> $GITHUB_ENV
+            echo "SKIP_REASON=既存ビルド" >> $GITHUB_ENV
           else
-            # スケジュール実行時のロジック
-            echo "スケジュール実行を検出しました。"
-            
-            # 既存タグをチェック
-            if git ls-remote --tags origin "refs/tags/$BASE_TAG" >/dev/null 2>&1; then
-              echo "::notice::コミット $SHORT_SHA のビルドは既に存在します。スキップします。"
-              echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-              echo "SKIP_REASON=既存ビルド" >> $GITHUB_ENV
-              exit 0
-            else
-              TARGET_TAG="$BASE_TAG"
-              TAG_STRATEGY="new"
-            fi
-            
-            BUILD_REASON="定期スケジュール"
+            echo "::notice::新しいコミットを検出！ビルドを開始します。"
+            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
+            echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+            echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+            echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
+            echo "BUILD_REASON=定期スケジュール" >> $GITHUB_ENV
+            echo "TAG_STRATEGY=new" >> $GITHUB_ENV
           fi
+
+      # ステップ4: 手動実行の場合のタグ決定
+      - name: Determine Tag for Manual Run
+        if: env.TRIGGER_TYPE == 'manual' && env.BUILD_NEEDED == 'true'
+        id: manual-tag
+        run: |
+          echo "=== 手動実行のタグ設定 ==="
           
-          # ビルドが必要な場合の環境変数を設定
-          echo "::notice::ビルドを開始します。タグ: $TARGET_TAG"
-          echo "BUILD_NEEDED=true" >> $GITHUB_ENV
+          # アップストリームの最新コミットを取得
+          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
+          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
+          SHORT_SHA=${UPSTREAM_SHA:0:7}
+          BASE_TAG="build-$SHORT_SHA"
+          
+          echo "アップストリーム最新コミット: $SHORT_SHA"
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-          echo "TAG_STRATEGY=$TAG_STRATEGY" >> $GITHUB_ENV
-          echo "BUILD_REASON=$BUILD_REASON" >> $GITHUB_ENV
           echo "BASE_TAG=$BASE_TAG" >> $GITHUB_ENV
+          
+          # 強制再ビルドの設定に基づいてタグを決定
+          if [[ "$FORCE_REBUILD" == "true" ]]; then
+            echo "::notice::強制再ビルドモード: 既存タグを上書きします"
+            echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
+            echo "TAG_STRATEGY=overwrite" >> $GITHUB_ENV
+          else
+            # タイムスタンプ付きのタグを作成
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            TARGET_TAG="${BASE_TAG}-manual-${TIMESTAMP}"
+            echo "::notice::新しい手動ビルドタグ: $TARGET_TAG"
+            echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
+            echo "TAG_STRATEGY=new" >> $GITHUB_ENV
+          fi
 
-      # ステップ4: アップストリームからソースコードを取得
+      # ステップ5: ビルド日時を取得
+      - name: Get build datetime
+        if: env.BUILD_NEEDED == 'true'
+        id: datetime
+        run: |
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
+          echo "short_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+
+      # ステップ6: アップストリームからソースコードを取得
       - name: Fetch & Checkout Upstream Source Code
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -134,7 +147,7 @@ jobs:
           
           echo "ソースコードの取得が完了しました。"
 
-      # ステップ5: パッケージ名とアプリ名をリファクタリング
+      # ステップ7: パッケージ名とアプリ名をリファクタリング
       - name: Refactor Package & App Names
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -180,9 +193,6 @@ jobs:
               if [ -d "$PARENT_DIR" ] && [ -z "$(ls -A "$PARENT_DIR")" ]; then
                 rmdir "$PARENT_DIR" || true
               fi
-              if [ -d "$(dirname "$PARENT_DIR")" ] && [ -z "$(ls -A "$(dirname "$PARENT_DIR")")" ]; then
-                rmdir "$(dirname "$PARENT_DIR")" || true
-              fi
             done
           else
             echo "移動対象のディレクトリが見つかりませんでした。"
@@ -196,22 +206,11 @@ jobs:
             echo "アプリ名を設定: $file"
             # 既存のapp_nameを置換
             sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">'"$APP_NAME"'</string>|g' "$file"
-            # または新規追加（存在しない場合）
-            if ! grep -q "name=\"app_name\"" "$file"; then
-              # 最初の<resources>タグの後に追加
-              sed -i 's|<resources>|<resources>\n    <string name="app_name">'"$APP_NAME"'</string>|' "$file"
-            fi
-          done 2>/dev/null || true
-          
-          # AndroidManifest.xml のラベルを更新
-          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" -exec grep -l "android:label" {} \; | while read file; do
-            echo "AndroidManifestを更新: $file"
-            sed -i 's|android:label="@string/app_name"|android:label="@string/app_name"|g' "$file"
           done 2>/dev/null || true
           
           echo "リファクタリングが完了しました。"
 
-      # ステップ6: Java環境のセットアップ
+      # ステップ8: Java環境のセットアップ
       - name: Setup Java Environment
         if: env.BUILD_NEEDED == 'true'
         uses: actions/setup-java@v4
@@ -219,7 +218,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # ステップ7: APKのビルド
+      # ステップ9: APKのビルド
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -229,33 +228,32 @@ jobs:
           chmod +x gradlew
           
           echo "依存関係を解決しています..."
-          ./gradlew dependencies || echo "依存関係の確認中に警告がありましたが続行します"
+          ./gradlew dependencies --info || echo "依存関係の確認中に警告がありましたが続行します"
           
           echo "リリース版APKをビルドしています..."
           if ./gradlew assembleRelease; then
             echo "::notice::リリース版APKのビルドに成功しました。"
-            BUILD_RESULT="release"
+            echo "BUILD_RESULT=release" >> $GITHUB_ENV
           else
             echo "::warning::リリース版ビルドに失敗しました。デバッグ版で再試行します..."
             if ./gradlew assembleDebug; then
               echo "::notice::デバッグ版APKのビルドに成功しました。"
-              BUILD_RESULT="debug"
+              echo "BUILD_RESULT=debug" >> $GITHUB_ENV
             else
               echo "::error::デバッグ版ビルドにも失敗しました。"
               exit 1
             fi
           fi
           
-          echo "BUILD_RESULT=$BUILD_RESULT" >> $GITHUB_ENV
           echo "ビルドが完了しました。結果: $BUILD_RESULT"
 
-      # ステップ8: リリースを作成
+      # ステップ10: リリースを作成
       - name: Create LIMEs-Neo Release
         if: env.BUILD_NEEDED == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TARGET_TAG }}
-          name: LIMEs-Neo Build ${{ env.SHORT_SHA }}  # 変更点: LIMEs-Second → LIMEs-Neo
+          name: LIMEs-Neo Build ${{ env.SHORT_SHA }}
           body: |
             # 🚀 LIMEs-Neo - 自動ビルド
             
@@ -266,6 +264,7 @@ jobs:
             - **ソースリポジトリ**: [${{ env.SOURCE_REPO }}](https://github.com/${{ env.SOURCE_REPO }})
             - **実行種別**: ${{ env.BUILD_REASON }}
             - **タグ戦略**: ${{ env.TAG_STRATEGY }}
+            - **ビルド種別**: ${{ env.BUILD_RESULT == 'release' && 'リリース版' || 'デバッグ版' }}
             
             ## 📦 パッケージ情報
             - **メインパッケージ名**: `${{ env.NEW_PKG }}`
@@ -274,273 +273,27 @@ jobs:
             ## 📝 注意事項
             このビルドはオリジナルアプリとの衝突を避けるため、パッケージ名をリファクタリングした自動フォークビルドです。
             
-            ### ビルド種別: ${{ env.BUILD_RESULT == 'release' && 'リリース版' || 'デバッグ版' }}
-            
             ---
             *このリリースはGitHub Actionsワークフローによって自動生成されました。*
           draft: false
           prerelease: false
-          overwrite: ${{ env.TAG_STRATEGY == 'overwrite' }}
+          overwrite: ${{ env.TAG_STRATEGY == 'overwrite' && true || false }}
           files: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ステップ9: ビルド完了通知
+      # ステップ11: ビルド完了通知
       - name: Build Complete Notification
         if: env.BUILD_NEEDED == 'true'
         run: |
           echo "=== ビルド完了 ==="
-          echo "アプリ名: LIMEs-Neo"
-          echo "ソースコミット: ${{ env.SHORT_SHA }}"
-          echo "リリースタグ: ${{ env.TARGET_TAG }}"
-          echo "ビルド種別: ${{ env.BUILD_RESULT }}"
-          echo "実行理由: ${{ env.BUILD_REASON }}"
+          echo "✅ アプリ名: LIMEs-Neo"
+          echo "✅ ソースコミット: ${{ env.SHORT_SHA }}"
+          echo "✅ リリースタグ: ${{ env.TARGET_TAG }}"
+          echo "✅ ビルド種別: ${{ env.BUILD_RESULT }}"
+          echo "✅ 実行理由: ${{ env.BUILD_REASON }}"
           echo ""
-          echo "リリースページ: https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
-          
-          if [ -z "$UPSTREAM_SHA" ]; then
-            echo "::error::Failed to get upstream SHA."
-            exit 1
-          fi
-          
-          SHORT_SHA=${UPSTREAM_SHA:0:7}
-          
-          # 手動トリガーかどうかを判定
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "::notice::Manual trigger detected. Forcing build..."
-            
-            # 手動トリガーの場合はforce_rebuild入力値をチェック
-            FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
-            if [[ "$FORCE_REBUILD" == "true" || "$FORCE_REBUILD" == "false" ]]; then
-              echo "Force rebuild input: $FORCE_REBUILD"
-            fi
-            
-            # 手動トリガーで既存タグがある場合の処理
-            TARGET_TAG="build-$SHORT_SHA"
-            if git ls-remote --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
-              echo "::warning::Tag $TARGET_TAG already exists on remote."
-              
-              # 手動トリガーでforce_rebuildがtrueの場合は強制リビルド
-              if [[ "$FORCE_REBUILD" == "true" ]]; then
-                echo "::notice::Force rebuild is enabled. Overwriting existing release."
-                echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-              else
-                # 既存タグがあっても新規タグを作成（手動実行用）
-                TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-                TARGET_TAG="build-$SHORT_SHA-manual-$TIMESTAMP"
-                echo "::notice::Creating new manual build tag: $TARGET_TAG"
-                echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-              fi
-            else
-              echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-            fi
-            
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-            echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-            
-          else
-            # スケジュールトリガーの場合は従来のロジック
-            TARGET_TAG="build-$SHORT_SHA"
-            
-            echo "Upstream Latest: $SHORT_SHA"
-            echo "Checking if tag already exists..."
-            
-            # まずローカルでタグを確認
-            if git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
-              echo "::notice::Build for commit $SHORT_SHA already exists locally. Skipping."
-              echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-            else
-              # ローカルにない場合、リモートもチェック
-              if git ls-remote --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
-                echo "::notice::Tag $TARGET_TAG already exists on remote. Skipping."
-                echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-              else
-                echo "::notice::New commit detected! Starting build..."
-                echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-                echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-                echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-                echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-              fi
-            fi
-          fi
-
-      - name: Fetch & Checkout Upstream Code
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "--- Fetching source code for commit: ${{ env.SHORT_SHA }} ---"
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
-          git fetch upstream
-          git checkout $UPSTREAM_SHA
-
-      - name: Refactor Package Names
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "--- Refactoring Package Names ---"
-          OLD_PKG="io.github.hiro.lime"
-          OLD_LINE="jp.naver.line.android"
-          
-          # 1. 文字列置換
-          echo "Replacing package names in files..."
-          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_PKG/$NEW_PKG/g" {} +
-          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_LINE/$NEW_LINE_PKG/g" {} +
-          
-          # 2. フォルダ移動
-          echo "Moving package directories..."
-          TARGET_DIRS=$(find . -type d -path "*/io/github/hiro/lime")
-          for DIR in $TARGET_DIRS; do
-            echo "Moving $DIR"
-            PARENT_DIR=$(dirname "$DIR")
-            BASE_DIR=$(dirname "$PARENT_DIR")
-            mkdir -p "$BASE_DIR/fork"
-            mv "$DIR" "$BASE_DIR/fork/lime"
-            rmdir "$PARENT_DIR" || true
-          done
-          echo "Refactoring complete."
-
-      - name: Setup Java
-        if: env.BUILD_NEEDED == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Build APK
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          chmod +x gradlew
-          # リリースビルド（失敗時はデバッグビルド）
-          ./gradlew assembleRelease || ./gradlew assembleDebug
-
-      - name: Create Release
-        if: env.BUILD_NEEDED == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TARGET_TAG }}
-          name: Build ${{ env.SHORT_SHA }}
-          body: |
-            Auto-build from upstream commit: ${{ env.SHORT_SHA }}
-            Date: $(date +'%Y-%m-%d %H:%M:%S')
-            
-            **Source Repository**: [${{ env.SOURCE_REPO }}](https://github.com/${{ env.SOURCE_REPO }})
-            **Commit**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
-            
-            Trigger type: ${{ github.event_name }}
-            ${{ github.event_name == 'workflow_dispatch' && format('Force rebuild: {0}', github.event.inputs.force_rebuild) || 'Scheduled daily build' }}
-            
-            This is an automated build with package name refactored to avoid conflicts with the original app.
-          draft: false
-          prerelease: false
-          overwrite: true  # 同じタグのリリースがあれば上書き
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          fi
-          
-          SHORT_SHA=${UPSTREAM_SHA:0:7}
-          TARGET_TAG="build-$SHORT_SHA"
-          
-          echo "Upstream Latest: $SHORT_SHA"
-          
-          # 【修正1】ローカルのタグチェックに加えて、リモートのタグもチェック
-          echo "Checking if tag already exists..."
-          
-          # まずローカルでタグを確認
-          if git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
-            echo "::notice::Build for commit $SHORT_SHA already exists locally. Skipping."
-            echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-          else
-            # ローカルにない場合、リモートもチェック
-            if git ls-remote --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
-              echo "::notice::Tag $TARGET_TAG already exists on remote. Skipping."
-              echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-            else
-              echo "::notice::New commit detected! Starting build..."
-              echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-              echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-              echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-              echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-            fi
-          fi
-
-      - name: Fetch & Checkout Upstream Code
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "--- Fetching source code for commit: ${{ env.SHORT_SHA }} ---"
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
-          git fetch upstream
-          git checkout $UPSTREAM_SHA
-
-      - name: Refactor Package Names
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "--- Refactoring Package Names ---"
-          OLD_PKG="io.github.hiro.lime"
-          OLD_LINE="jp.naver.line.android"
-          
-          # 1. 文字列置換
-          echo "Replacing package names in files..."
-          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_PKG/$NEW_PKG/g" {} +
-          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_LINE/$NEW_LINE_PKG/g" {} +
-          
-          # 2. フォルダ移動
-          echo "Moving package directories..."
-          TARGET_DIRS=$(find . -type d -path "*/io/github/hiro/lime")
-          for DIR in $TARGET_DIRS; do
-            echo "Moving $DIR"
-            PARENT_DIR=$(dirname "$DIR")
-            BASE_DIR=$(dirname "$PARENT_DIR")
-            mkdir -p "$BASE_DIR/fork"
-            mv "$DIR" "$BASE_DIR/fork/lime"
-            rmdir "$PARENT_DIR" || true
-          done
-          echo "Refactoring complete."
-
-      - name: Setup Java
-        if: env.BUILD_NEEDED == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Build APK
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          chmod +x gradlew
-          # リリースビルド（失敗時はデバッグビルド）
-          ./gradlew assembleRelease || ./gradlew assembleDebug
-
-      - name: Create Release
-        if: env.BUILD_NEEDED == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TARGET_TAG }}
-          name: Build ${{ env.SHORT_SHA }}
-          body: |
-            Auto-build from upstream commit: ${{ env.SHORT_SHA }}
-            Date: $(date +'%Y-%m-%d')
-            
-            **Source Repository**: [${{ env.SOURCE_REPO }}](https://github.com/${{ env.SOURCE_REPO }})
-            **Commit**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
-            
-            This is an automated build with package name refactored to avoid conflicts with the original app.
-          draft: false
-          prerelease: false
-          # 【修正2】リリースを上書きする設定（同じタグが存在する場合に上書き）
-          overwrite: true
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 【修正3】最後のgit push手順は完全に削除しました
-      # action-gh-releaseがタグを自動で作成・管理します
-      # 手動でタグをプッシュすると重複エラーが発生するため削除
+          echo "📦 リリースページ:"
+          echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
