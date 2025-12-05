@@ -86,26 +86,22 @@ jobs:
           echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
           
-          # タグ名生成
           SHORT_SHA=$(git rev-parse --short HEAD)
           echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           echo "TARGET_TAG=build-${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_ENV
 
-      # === 修正箇所: ブランチ名の自動判定を追加 ===
       - name: Fetch Source Code
         if: env.BUILD_NEEDED == 'true'
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # リモート追加 (失敗しても続行)
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
-          
           echo "Fetching upstream..."
           git fetch upstream
           
-          # ブランチ判定 (main または master)
+          # ブランチ名の自動判定 (main または master)
           if git rev-parse --verify upstream/main >/dev/null 2>&1; then
             echo "Branch 'main' found."
             UPSTREAM_BRANCH="upstream/main"
@@ -114,14 +110,11 @@ jobs:
             UPSTREAM_BRANCH="upstream/master"
           else
             echo "Error: Neither 'main' nor 'master' branch found in upstream."
-            git branch -r
             exit 1
           fi
           
-          # 最新コミットハッシュ取得
           UPSTREAM_SHA=$(git rev-parse $UPSTREAM_BRANCH)
-          echo "Target Commit: $UPSTREAM_SHA ($UPSTREAM_BRANCH)"
-          
+          echo "Target Commit: $UPSTREAM_SHA"
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           git checkout $UPSTREAM_SHA
 
@@ -136,19 +129,23 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # === デバッグ用：変更前の状態を保存 ===
+      # === デバッグ保存 (Before) ===
+      # 重要: ! -path "*/debug_artifacts/*" を追加して自分自身をコピーしないように修正
       - name: Save Files Before Modification (Debug)
         if: env.BUILD_NEEDED == 'true'
         run: |
           mkdir -p debug_artifacts/before
           
           echo "保存中: AndroidManifest.xml"
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" -exec cp --parents {} debug_artifacts/before/ \;
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
+            -exec cp --parents {} debug_artifacts/before/ \;
           
           echo "保存中: 主要なKotlinファイル"
-          find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/before/
+          find . -name "*.kt" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | head -n 20 | \
+            xargs -I {} cp --parents {} debug_artifacts/before/
 
-      # === 置換処理の実行 ===
+      # === 置換処理 ===
+      # 重要: ここでも ! -path "*/debug_artifacts/*" を追加してバックアップを書き換えないように修正
       - name: Apply Package & Scope Changes
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -157,59 +154,61 @@ jobs:
           OLD_PKG="io.github.hiro.lime"
           NEW_PKG="io.github.fork.lime"
           
-          # 1. モジュール自体のパッケージ名を変更
-          echo "パッケージ名置換: $OLD_PKG -> $NEW_PKG"
+          # 1. パッケージ名置換
+          echo "パッケージ名置換実行"
           find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
-            ! -path "*/build/*" ! -path "*/.git/*" \
+            ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" \
             -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
 
-          # 2. AndroidManifest.xml の xposedscope を強制書き換え
+          # 2. AndroidManifest.xml の強制修正 (Clone対応)
           echo "AndroidManifestのスコープ修正"
-          
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" | while read manifest; do
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | while read manifest; do
             echo "Processing: $manifest"
-            # jp.naver.line.android を jp.naver.line.android.clone に書き換え
             sed -i 's|android:value="jp.naver.line.android"|android:value="jp.naver.line.android.clone"|g' "$manifest"
-            grep "xposedscope" "$manifest" || echo "WARNING: xposedscope not found in $manifest"
           done
 
-          # 3. ソースコードのロジック緩和
+          # 3. ソースコードのロジック緩和 (Clone対応)
           echo "ソースコードの判定ロジック緩和"
           
-          # startsWith に変更して前方一致にする
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+          # '==' -> '.startsWith'
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
              -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
              
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+          # '!=' -> '!...startsWith'
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
              -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
              
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+          # 'equals' -> 'startsWith'
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
              -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
 
           echo "=== 変更処理完了 ==="
 
-      # === デバッグ用：変更後の状態を保存 ===
+      # === デバッグ保存 (After) ===
       - name: Save Files After Modification (Debug)
         if: env.BUILD_NEEDED == 'true'
         run: |
           mkdir -p debug_artifacts/after
           
           echo "保存中: AndroidManifest.xml"
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" -exec cp --parents {} debug_artifacts/after/ \;
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
+            -exec cp --parents {} debug_artifacts/after/ \;
           
           echo "保存中: 主要なKotlinファイル"
-          find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/after/
+          find . -name "*.kt" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | head -n 20 | \
+            xargs -I {} cp --parents {} debug_artifacts/after/
           
+          echo "ZIP作成中..."
           zip -r debug_files.zip debug_artifacts/
 
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
         run: |
-          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
             while read file; do
               sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo"|g' "$file"
             done
-          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
             while read file; do
               sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
             done
@@ -240,11 +239,13 @@ jobs:
           body: |
             # 🛠 Debug Build
             
-            - **Source**: ${{ env.SHORT_SHA }} (from ${{ env.UPSTREAM_SHA }})
+            - **Source**: ${{ env.SHORT_SHA }}
             - **Target**: jp.naver.line.android.clone
             
-            ## Debugging
-            Check `debug_files.zip` to compare `before` and `after` states of AndroidManifest.xml.
+            ## 🐞 Debugging
+            - Download `debug_files.zip`
+            - Compare `before/` vs `after/` to verify `AndroidManifest.xml` changes.
+            - Check `xposedscope` value in manifest.
           draft: false
           prerelease: false
           files: |
