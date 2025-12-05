@@ -92,15 +92,36 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           echo "TARGET_TAG=build-${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_ENV
 
+      # === 修正箇所: ブランチ名の自動判定を追加 ===
       - name: Fetch Source Code
         if: env.BUILD_NEEDED == 'true'
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          
+          # リモート追加 (失敗しても続行)
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
+          
+          echo "Fetching upstream..."
           git fetch upstream
-          # 最新を取得
-          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          
+          # ブランチ判定 (main または master)
+          if git rev-parse --verify upstream/main >/dev/null 2>&1; then
+            echo "Branch 'main' found."
+            UPSTREAM_BRANCH="upstream/main"
+          elif git rev-parse --verify upstream/master >/dev/null 2>&1; then
+            echo "Branch 'master' found."
+            UPSTREAM_BRANCH="upstream/master"
+          else
+            echo "Error: Neither 'main' nor 'master' branch found in upstream."
+            git branch -r
+            exit 1
+          fi
+          
+          # 最新コミットハッシュ取得
+          UPSTREAM_SHA=$(git rev-parse $UPSTREAM_BRANCH)
+          echo "Target Commit: $UPSTREAM_SHA ($UPSTREAM_BRANCH)"
+          
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           git checkout $UPSTREAM_SHA
 
@@ -115,7 +136,7 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # === 【重要】デバッグ用：変更前の状態を保存 ===
+      # === デバッグ用：変更前の状態を保存 ===
       - name: Save Files Before Modification (Debug)
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -124,7 +145,7 @@ jobs:
           echo "保存中: AndroidManifest.xml"
           find . -name "AndroidManifest.xml" ! -path "*/build/*" -exec cp --parents {} debug_artifacts/before/ \;
           
-          echo "保存中: 主要なKotlinファイル (ConstantsやHook関連)"
+          echo "保存中: 主要なKotlinファイル"
           find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/before/
 
       # === 置換処理の実行 ===
@@ -143,25 +164,19 @@ jobs:
             -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
 
           # 2. AndroidManifest.xml の xposedscope を強制書き換え
-          #    LSPatchがcloneアプリを認識するために必須
           echo "AndroidManifestのスコープ修正"
-          TARGET_SCOPE="jp.naver.line.android.clone"
           
           find . -name "AndroidManifest.xml" ! -path "*/build/*" | while read manifest; do
             echo "Processing: $manifest"
-            # 元の xposedscope 行を検索して、ターゲットの値を書き換える
-            # 注意: 元の値が jp.naver.line.android であることを前提としています
+            # jp.naver.line.android を jp.naver.line.android.clone に書き換え
             sed -i 's|android:value="jp.naver.line.android"|android:value="jp.naver.line.android.clone"|g' "$manifest"
-            
-            # 確認用ログ
             grep "xposedscope" "$manifest" || echo "WARNING: xposedscope not found in $manifest"
           done
 
           # 3. ソースコードのロジック緩和
-          #    jp.naver.line.android (公式) と .clone (クローン) 両方で動作するように
           echo "ソースコードの判定ロジック緩和"
           
-          # パッケージ名チェックを startsWith に変更
+          # startsWith に変更して前方一致にする
           find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
              -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
              
@@ -173,7 +188,7 @@ jobs:
 
           echo "=== 変更処理完了 ==="
 
-      # === 【重要】デバッグ用：変更後の状態を保存 ===
+      # === デバッグ用：変更後の状態を保存 ===
       - name: Save Files After Modification (Debug)
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -185,7 +200,6 @@ jobs:
           echo "保存中: 主要なKotlinファイル"
           find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/after/
           
-          # 差分比較用のZIP作成
           zip -r debug_files.zip debug_artifacts/
 
       - name: Unify Application Name
@@ -226,18 +240,11 @@ jobs:
           body: |
             # 🛠 Debug Build
             
-            うまく動作しない場合のデバッグ用ビルドです。
+            - **Source**: ${{ env.SHORT_SHA }} (from ${{ env.UPSTREAM_SHA }})
+            - **Target**: jp.naver.line.android.clone
             
-            ## 📂 デバッグ方法
-            添付されている `debug_files.zip` をダウンロード・解凍してください。
-            - `before/`: 置換前のファイル
-            - `after/`: 置換後のファイル
-            
-            これらを比較して、`AndroidManifest.xml` の `xposedscope` が正しく `jp.naver.line.android.clone` になっているか確認できます。
-            
-            ## ビルド情報
-            - Tag: ${{ env.TARGET_TAG }}
-            - Target: jp.naver.line.android.clone
+            ## Debugging
+            Check `debug_files.zip` to compare `before` and `after` states of AndroidManifest.xml.
           draft: false
           prerelease: false
           files: |
