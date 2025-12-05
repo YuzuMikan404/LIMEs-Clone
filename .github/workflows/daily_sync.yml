@@ -12,7 +12,7 @@ jobs:
   check-and-build:
     runs-on: ubuntu-latest
     env:
-      SOURCE_REPO: YuzuMikan404/PrtivateLIMEs
+      SOURCE_REPO: areteruhiro/PrtivateLIMEs
       MY_PAT: ${{ secrets.PAT }}
       NEW_PKG: "io.github.fork.lime"
       NEW_LINE_PKG: "jp.naver.line.android.clone"
