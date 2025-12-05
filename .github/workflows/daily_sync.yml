@@ -300,6 +300,13 @@ jobs:
           echo "  $OLD_PKG → $NEW_PKG"
           echo "  $OLD_LINE → $NEW_LINE_PKG"
           
+          # 重要なファイルのバックアップ
+          echo "重要ファイルのバックアップ作成..."
+          find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              cp "$file" "${file}.bak"
+            done
+          
           # AndroidManifest.xmlの処理
           echo "1. AndroidManifest.xmlの処理..."
           find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
@@ -318,6 +325,17 @@ jobs:
               if [[ -f "$file" ]]; then
                 sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file" 2>/dev/null || true
                 sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file" 2>/dev/null || true
+              fi
+            done
+          
+          # MainActivity.javaのパッケージ宣言を確認・修正
+          echo "3. MainActivity.javaのパッケージ宣言確認..."
+          find . -name "MainActivity.java" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              echo "  確認中: $file"
+              if grep -q "^package $OLD_PKG;" "$file"; then
+                echo "  ✓ パッケージ宣言を修正: $OLD_PKG → $NEW_PKG"
+                sed -i "s|^package $OLD_PKG;|package $NEW_PKG;|g" "$file"
               fi
             done
           
@@ -420,11 +438,11 @@ EOF "$BUILD_GRADLE_PATH"
           echo "修正後のbuild.gradleの関連部分:"
           grep -A 10 "buildTypes" "$BUILD_GRADLE_PATH" || true
 
-      # ステップ12.6: ソースコードのハードコードされたパッケージ名を置換（LSPatchスコープ対応のため追加）
+      # ステップ12.6: ソースコードのハードコードされたパッケージ名を置換（UI表示問題修正版）
       - name: Replace Hardcoded Package Names in Source
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== ソースコードのハードコードされたパッケージ名置換 ==="
+          echo "=== ソースコードのハードコードされたパッケージ名置換（UI表示問題修正版） ==="
           
           # 元のパッケージ名と新しいパッケージ名
           OLD_PKG="jp.naver.line.android"
@@ -435,68 +453,94 @@ EOF "$BUILD_GRADLE_PATH"
           find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
             while read file; do
               echo "  処理中: $file"
+              # 複数のパターンに対応
               sed -i "s|android:value=\"$OLD_PKG\"|android:value=\"$NEW_PKG\"|g" "$file"
               sed -i "s|android:value=\"${OLD_PKG}\"|android:value=\"${NEW_PKG}\"|g" "$file"
+              sed -i "s|android:value=\"$OLD_PKG\"|android:value=\"$NEW_PKG\"|g" "$file"
             done
           
-          # 2. Java/Kotlinソースファイル内の定数を置換
-          echo "2. ソースファイル内の定数を修正..."
-          find . -type f \( -name "*.java" -o -name "*.kt" \) ! -path "*/build/*" ! -path "*/.git/*" | \
-            while read file; do
-              # 安全に置換（完全一致を確認）
-              if grep -q "\"$OLD_PKG\"" "$file"; then
-                echo "  処理中: $file"
-                sed -i "s|\"$OLD_PKG\"|\"$NEW_PKG\"|g" "$file"
-              fi
-            done
-          
-          # 3. 特定の重要な定数を強制置換（Main.javaなど）
-          echo "3. 重要な定数を個別修正..."
-          
-          # Main.javaのTARGET_PACKAGE定数
+          # 2. Main.javaの修正（UI表示問題の根本修正）
+          echo "2. Main.javaを修正（UI表示問題対応）..."
           find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
             while read file; do
               if [[ -f "$file" ]]; then
                 echo "  処理中: $file"
-                # 複数のパターンに対応
-                sed -i "s|TARGET_PACKAGE = \"$OLD_PKG\"|TARGET_PACKAGE = \"$NEW_PKG\"|g" "$file"
-                sed -i "s|PACKAGE_NAME = \"$OLD_PKG\"|PACKAGE_NAME = \"$NEW_PKG\"|g" "$file"
-                sed -i "s|\"$OLD_PKG\".equals|\"$NEW_PKG\".equals|g" "$file"
                 
-                # BuildConfigのインポートを追加（なければ）
-                if ! grep -q "import.*BuildConfig" "$file"; then
-                  # パッケージ宣言の後に追加
-                  sed -i "/^package /a import io.github.fork.lime.BuildConfig;" "$file" || echo "インポート追加失敗（既にあるかもしれません）"
+                # バックアップからの復元（もしあれば）
+                if [[ -f "${file}.bak" ]]; then
+                  echo "  バックアップから復元..."
+                  cp "${file}.bak" "$file"
                 fi
                 
-                # TARGET_PACKAGE定数をBuildConfigから取得するように変更
-                sed -i "s|private static final String TARGET_PACKAGE = \".*\";|private static String getTargetPackage() { return BuildConfig.TARGET_PACKAGE; }|g" "$file"
-                sed -i "s|!lpparam.packageName.equals(TARGET_PACKAGE)|!lpparam.packageName.equals(getTargetPackage())|g" "$file"
+                # パッケージ宣言の確認と修正
+                if grep -q "^package io.github.hiro.lime;" "$file"; then
+                  echo "  パッケージ宣言を修正: io.github.hiro.lime → io.github.fork.lime"
+                  sed -i "s|^package io.github.hiro.lime;|package io.github.fork.lime;|g" "$file"
+                fi
+                
+                # TARGET_PACKAGE定数を直接設定（BuildConfig依存を削除）
+                echo "  TARGET_PACKAGE定数を直接設定..."
+                
+                # 既存のTARGET_PACKAGE定数を検索して置換
+                if grep -q "private static final String TARGET_PACKAGE = " "$file"; then
+                  sed -i "s|private static final String TARGET_PACKAGE = \".*\";|private static final String TARGET_PACKAGE = \"$NEW_PKG\";|g" "$file"
+                else
+                  # 定数が見つからない場合は追加（クラスの先頭付近に）
+                  sed -i "/public class Main implements IXposedHookLoadPackage/ i \    private static final String TARGET_PACKAGE = \"$NEW_PKG\";" "$file"
+                fi
+                
+                # BuildConfigのインポートを削除（あれば）
+                sed -i "/import.*BuildConfig;/d" "$file"
+                
+                # Constants.PACKAGE_NAMEの参照を修正
+                sed -i "s|Constants.PACKAGE_NAME = \".*\"|Constants.PACKAGE_NAME = \"$NEW_PKG\"|g" "$file"
+                sed -i "s|Constants.PACKAGE_NAME, \"|$NEW_PKG, \"|g" "$file"
+                
+                # handleLoadPackageメソッド内のパッケージ名チェックを修正
+                sed -i "s|!lpparam.packageName.equals(TARGET_PACKAGE)|!lpparam.packageName.equals(TARGET_PACKAGE)|g" "$file"
+                sed -i "s|!lpparam.packageName.equals(Constants.PACKAGE_NAME)|!lpparam.packageName.equals(TARGET_PACKAGE)|g" "$file"
               fi
             done
           
-          # Constants.java（存在する場合）
+          # 3. Constants.javaの修正（存在する場合）
+          echo "3. Constants.javaを修正..."
           find . -name "Constants.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
             while read file; do
               if [[ -f "$file" ]]; then
                 echo "  処理中: $file"
+                # パッケージ宣言の修正
+                if grep -q "^package io.github.hiro.lime;" "$file"; then
+                  sed -i "s|^package io.github.hiro.lime;|package io.github.fork.lime;|g" "$file"
+                fi
+                # PACKAGE_NAME定数の修正
+                sed -i "s|PACKAGE_NAME = \".*\"|PACKAGE_NAME = \"$NEW_PKG\"|g" "$file"
                 sed -i "s|\"$OLD_PKG\"|\"$NEW_PKG\"|g" "$file"
               fi
             done
           
-          echo "ハードコードされたパッケージ名を置換完了"
+          # 4. 他の重要なクラスのパッケージ宣言を修正
+          echo "4. 他のクラスのパッケージ宣言を修正..."
+          find . -type f \( -name "*.java" -o -name "*.kt" \) ! -path "*/build/*" ! -path "*/.git/*" | \
+            while read file; do
+              if grep -q "^package io.github.hiro.lime;" "$file"; then
+                echo "  処理中: $file"
+                sed -i "s|^package io.github.hiro.lime;|package io.github.fork.lime;|g" "$file"
+              fi
+            done
           
-          # 4. 修正結果を確認
-          echo "4. 修正結果を確認:"
-          echo "   - xposedscope値:"
+          echo "ソースコード修正完了"
+          
+          # 5. 修正結果を確認
+          echo "5. 修正結果を確認:"
+          echo "   - Main.javaのTARGET_PACKAGE:"
+          find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            xargs grep -h "TARGET_PACKAGE = " 2>/dev/null || true
+          
+          echo "   - AndroidManifest.xmlのxposedscope:"
           find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
             xargs grep -h "xposedscope" 2>/dev/null || true
-          
-          echo "   - TARGET_PACKAGE定数:"
-          find . -name "*.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
-            xargs grep -h "TARGET_PACKAGE" 2>/dev/null | head -5 || true
 
-      # ステップ13: アプリ名の統一設定（元のステップ14を繰り上げ）
+      # ステップ13: アプリ名の統一設定
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -514,7 +558,7 @@ EOF "$BUILD_GRADLE_PATH"
               sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
             done
 
-      # ステップ14: Gradle権限設定（元のステップ15を繰り上げ）
+      # ステップ14: Gradle権限設定
       - name: Set Gradle Permissions
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -524,7 +568,7 @@ EOF "$BUILD_GRADLE_PATH"
             echo "gradlewに実行権限を付与"
           fi
 
-      # ステップ15: APKビルド実行（元のステップ16を繰り上げ）
+      # ステップ15: APKビルド実行
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -544,23 +588,51 @@ EOF "$BUILD_GRADLE_PATH"
           echo "実行するビルドコマンド: ${BUILD_COMMANDS[@]}"
           
           # クリーンビルド（キャッシュクリアが重要）
-          ./gradlew clean 2>&1 | tail -20 || echo "クリーンビルド警告"
+          echo "クリーンビルドを実行..."
+          ./gradlew clean 2>&1 | tail -30
+          
+          # 依存関係の確認
+          echo "依存関係を確認..."
+          ./gradlew dependencies --configuration releaseRuntimeClasspath 2>&1 | head -50
           
           # 各ビルドを実行
           for cmd in "${BUILD_COMMANDS[@]}"; do
             echo "実行中: ./gradlew $cmd"
-            if ./gradlew $cmd --stacktrace --no-daemon 2>&1; then
+            echo "==============================="
+            
+            # ビルド実行（詳細ログを出力）
+            if timeout 600 ./gradlew $cmd --stacktrace --no-daemon --info 2>&1 | tee build.log; then
               echo "✅ $cmd 成功"
               echo "BUILD_RESULT=${cmd#assemble}" >> $GITHUB_ENV
               
-              # ビルド後の確認
-              echo "ビルド後の確認:"
-              find . -name "BuildConfig.java" -type f | \
+              # ビルドログからエラーを確認
+              if grep -q "error:" build.log; then
+                echo "⚠️ ビルドログにエラーが見つかりました:"
+                grep -i "error:" build.log | head -10
+              fi
+              
+              # BuildConfigの生成を確認
+              echo "BuildConfigの生成確認:"
+              find . -name "BuildConfig.java" -type f 2>/dev/null | \
                 xargs grep -h "TARGET_PACKAGE" 2>/dev/null || echo "BuildConfig確認不可"
             else
               echo "❌ $cmd 失敗"
-              # 失敗時はデバッグ情報を出力
-              ./gradlew $cmd --stacktrace 2>&1 | tail -100
+              
+              # 失敗時の詳細ログ
+              echo "ビルドログの最後の100行:"
+              tail -100 build.log
+              
+              # 特定のエラーパターンをチェック
+              if grep -q "package.*does not exist" build.log; then
+                echo "⚠️ パッケージ関連のエラーを検出:"
+                grep -B2 -A2 "package.*does not exist" build.log
+              fi
+              
+              if grep -q "cannot find symbol" build.log; then
+                echo "⚠️ シンボルが見つからないエラー:"
+                grep -B2 -A2 "cannot find symbol" build.log | head -20
+              fi
+              
               exit 1
             fi
           done
@@ -574,10 +646,16 @@ EOF "$BUILD_GRADLE_PATH"
             # APK内のAndroidManifest.xmlを確認（xposedscope値）
             echo "    xposedscope値確認:"
             unzip -p "$apk" AndroidManifest.xml 2>/dev/null | \
-              strings 2>/dev/null | grep -i xposedscope || echo "    確認不可"
+              strings 2>/dev/null | grep -B1 -A1 -i xposedscope || echo "    確認不可"
+          done
+          
+          # ビルドディレクトリの内容を確認
+          echo "ビルド出力ディレクトリ:"
+          find app/build -name "*.apk" -type f 2>/dev/null | while read f; do
+            echo "  - $f"
           done
 
-      # ステップ16: GitHubリリース作成（元のステップ17を繰り上げ）
+      # ステップ16: GitHubリリース作成
       - name: Create GitHub Release
         if: env.BUILD_NEEDED == 'true' && success()
         uses: softprops/action-gh-release@v2
@@ -585,7 +663,7 @@ EOF "$BUILD_GRADLE_PATH"
           tag_name: ${{ env.TARGET_TAG }}
           name: LIMEs-Neo ${{ env.SHORT_SHA }} (${{ env.BUILD_DATE }})
           body: |
-            # 🚀 LIMEs-Neo - LSPatch対応ビルド
+            # 🚀 LIMEs-Neo - LSPatch対応ビルド（UI表示問題修正版）
             
             ## 📋 ビルド情報
             - **ソースコミット**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
@@ -599,12 +677,14 @@ EOF "$BUILD_GRADLE_PATH"
             **モジュール**: `io.github.fork.lime` (LIMEs-Neo)
             **xposedscope**: `jp.naver.line.android.clone` (修正済み)
             
-            ## 🔧 修正内容
+            ## 🔧 修正内容（UI表示問題対応）
             1. ✅ パッケージ名を変更してオリジナルアプリと競合しないようにしました
             2. ✅ build.gradleを動的に修正し、BuildConfig.TARGET_PACKAGEを設定
             3. ✅ AndroidManifest.xmlのxposedscope値を正しいターゲットに修正
-            4. ✅ Main.javaのTARGET_PACKAGE定数をBuildConfigから動的に取得
-            5. ✅ アプリ名を統一
+            4. ✅ Main.javaのTARGET_PACKAGE定数を直接文字列で設定（BuildConfig依存を削除）
+            5. ✅ Main.javaのパッケージ宣言を正しく修正
+            6. ✅ すべてのソースファイルのパッケージ宣言を一貫して修正
+            7. ✅ アプリ名を統一
             
             ## 📦 ダウンロード
             以下のAPKファイルが利用可能です。
@@ -613,6 +693,7 @@ EOF "$BUILD_GRADLE_PATH"
             - LSPatch 1.10.2以上を使用してください
             - 埋め込みモードでの適用を推奨します
             - ターゲットAPK: **LINE-Neo** (`jp.naver.line.android.clone`)
+            - モジュールAPK: **LIMEs-Neo** (`io.github.fork.lime`)
             
             ## 🔍 確認方法
             ```bash
@@ -620,8 +701,12 @@ EOF "$BUILD_GRADLE_PATH"
             unzip -p [apkファイル] AndroidManifest.xml | strings | grep xposedscope
             ```
             
+            ## 🐛 既知の問題と解決策
+            - **UIが表示されない問題**: 修正済み。パッケージ宣言と定数参照の問題を解決
+            - **LSPatchでスコープできない問題**: 修正済み。xposedscope値を正しいターゲットに設定
+            
             ---
-            *GitHub Actionsによる自動ビルド（LSPatchスコープ対応版）*
+            *GitHub Actionsによる自動ビルド（UI表示問題修正版）*
           draft: false
           prerelease: false
           overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
@@ -631,7 +716,7 @@ EOF "$BUILD_GRADLE_PATH"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ステップ17: ビルド完了通知（元のステップ18を繰り上げ）
+      # ステップ17: ビルド完了通知
       - name: Build Completion Notification
         if: always()
         run: |
@@ -663,6 +748,8 @@ EOF "$BUILD_GRADLE_PATH"
             echo "1. ターゲットAPK: $NEW_LINE_PKG (LINE-Neo)"
             echo "2. モジュールAPK: $NEW_PKG (LIMEs-Neo)"
             echo "3. xposedscope値: $NEW_LINE_PKG (修正済み)"
+            echo ""
+            echo "⚠️ 注意: UI表示問題を修正しました。以前のバージョンでUIが表示されなかった場合は、このバージョンをお試しください。"
           else
             echo "❌ ビルド失敗"
             echo ""
@@ -671,4 +758,11 @@ EOF "$BUILD_GRADLE_PATH"
             echo "- トリガー: ${{ env.TRIGGER_TYPE || '不明' }}"
             echo "- ワークフロー: ${{ github.workflow }}"
             echo "- リポジトリ: ${{ github.repository }}"
+            
+            # ビルドログの確認
+            if [[ -f "build.log" ]]; then
+              echo ""
+              echo "📝 ビルドログのエラー箇所:"
+              grep -i "error:" build.log | head -10 || echo "エラー箇所が見つかりません"
+            fi
           fi
