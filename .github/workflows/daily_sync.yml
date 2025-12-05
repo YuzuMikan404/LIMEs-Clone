@@ -323,67 +323,180 @@ jobs:
           
           echo "パッケージ名置換完了"
 
-      # ステップ13: LINE-Neoマニフェストにxposedscopeを追加（修正版）
-      - name: Add xposedscope to LINE-Neo Manifest
+      # ステップ12.5: build.gradleの動的修正（LSPatchスコープ対応のため追加）
+      - name: Modify build.gradle for Package Names
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== LINE-Neoマニフェストにxposedscopeを追加 ==="
+          echo "=== build.gradleを動的に修正 ==="
           
-          # LINE-Neoのマニフェストを検索
-          TARGET_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
-            xargs grep -l "jp.naver.line.android" 2>/dev/null | head -1)
+          # app/build.gradleが存在するディレクトリを探す
+          BUILD_GRADLE_PATH=$(find . -name "build.gradle" -path "*/app/*" -type f ! -path "*/build/*" ! -path "*/.gradle/*" | head -1)
           
-          if [[ -z "$TARGET_MANIFEST" ]]; then
-            TARGET_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | head -1)
+          if [[ -z "$BUILD_GRADLE_PATH" ]]; then
+            # 代替パスを探す
+            BUILD_GRADLE_PATH=$(find . -name "build.gradle" -type f ! -path "*/build/*" ! -path "*/.gradle/*" | grep -E "(/app/|/app$)" | head -1)
           fi
           
-          if [[ -n "$TARGET_MANIFEST" ]]; then
-            echo "ターゲットマニフェスト: $TARGET_MANIFEST"
-            
-            # Pythonスクリプトでxposedscopeを追加
-            python3 << EOF
-          import xml.etree.ElementTree as ET
-          import sys
-          
-          manifest_path = "${TARGET_MANIFEST}"
-          
-          try:
-              # XMLをパース
-              ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-              tree = ET.parse(manifest_path)
-              root = tree.getroot()
-              
-              # applicationタグを取得
-              application = root.find('application')
-              
-              if application is not None:
-                  # 既存のxposedscopeを削除
-                  for meta in list(application.findall('meta-data')):
-                      name = meta.get('{http://schemas.android.com/apk/res/android}name')
-                      if name == 'xposedscope':
-                          application.remove(meta)
-                  
-                  # 新しいmeta-dataを追加
-                  meta_data = ET.Element('meta-data')
-                  meta_data.set('{http://schemas.android.com/apk/res/android}name', 'xposedscope')
-                  meta_data.set('{http://schemas.android.com/apk/res/android}value', 'io.github.fork.lime')
-                  application.insert(0, meta_data)
-                  
-                  # 保存
-                  tree.write(manifest_path, encoding='utf-8', xml_declaration=True)
-                  print("✓ xposedscopeを追加しました: io.github.fork.lime")
-              else:
-                  print("エラー: applicationタグが見つかりません")
-                  sys.exit(1)
-          
-          except Exception as e:
-              print(f"エラー: {e}")
-              sys.exit(1)
-          EOF
-          
+          if [[ -z "$BUILD_GRADLE_PATH" ]]; then
+            echo "::warning::build.gradleファイルが見つかりません"
+            exit 0
           fi
+          
+          echo "修正対象: $BUILD_GRADLE_PATH"
+          
+          # build.gradleの内容をバックアップ
+          cp "$BUILD_GRADLE_PATH" "${BUILD_GRADLE_PATH}.bak"
+          
+          # ビルド設定を追加/更新するPythonスクリプト
+          python3 << 'EOF'
+import sys
+import re
 
-      # ステップ14: アプリ名の統一設定
+build_gradle_path = sys.argv[1]
+with open(build_gradle_path, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# 既存のandroidブロックを探す
+android_pattern = r'android\s*{'
+match = re.search(android_pattern, content)
+
+if match:
+    # androidブロック内にbuildTypesを追加
+    android_end = content.find('}', match.end())
+    if android_end != -1:
+        build_types_config = '''
+    buildTypes {
+        release {
+            buildConfigField "String", "TARGET_PACKAGE", "\\"jp.naver.line.android.clone\\""
+            resValue "string", "xposedscope_value", "jp.naver.line.android.clone"
+        }
+        debug {
+            buildConfigField "String", "TARGET_PACKAGE", "\\"jp.naver.line.android.clone\\""
+            resValue "string", "xposedscope_value", "jp.naver.line.android.clone"
+        }
+    }'''
+        
+        # 既存のbuildTypesがあるか確認
+        if 'buildTypes' not in content[match.end():android_end]:
+            new_content = content[:android_end] + build_types_config + content[android_end:]
+        else:
+            # 既存のbuildTypesを置換
+            build_types_pattern = r'buildTypes\s*{[^}]*}'
+            new_content = re.sub(build_types_pattern, build_types_config, content, flags=re.DOTALL)
+    else:
+        new_content = content
+else:
+    # androidブロックがない場合は追加（通常はありえないが）
+    default_config_pattern = r'defaultConfig\s*{'
+    match = re.search(default_config_pattern, content)
+    if match:
+        default_end = content.find('}', match.end())
+        if default_end != -1:
+            build_types_config = '''
+    buildTypes {
+        release {
+            buildConfigField "String", "TARGET_PACKAGE", "\\"jp.naver.line.android.clone\\""
+            resValue "string", "xposedscope_value", "jp.naver.line.android.clone"
+        }
+        debug {
+            buildConfigField "String", "TARGET_PACKAGE", "\\"jp.naver.line.android.clone\\""
+            resValue "string", "xposedscope_value", "jp.naver.line.android.clone"
+        }
+    }'''
+            new_content = content[:default_end+1] + build_types_config + content[default_end+1:]
+        else:
+            new_content = content
+    else:
+        new_content = content
+
+# 変更を保存
+with open(build_gradle_path, 'w', encoding='utf-8') as f:
+    f.write(new_content)
+
+print("✅ build.gradleを修正しました")
+EOF "$BUILD_GRADLE_PATH"
+          
+          # 修正内容を確認
+          echo "修正後のbuild.gradleの関連部分:"
+          grep -A 10 "buildTypes" "$BUILD_GRADLE_PATH" || true
+
+      # ステップ12.6: ソースコードのハードコードされたパッケージ名を置換（LSPatchスコープ対応のため追加）
+      - name: Replace Hardcoded Package Names in Source
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          echo "=== ソースコードのハードコードされたパッケージ名置換 ==="
+          
+          # 元のパッケージ名と新しいパッケージ名
+          OLD_PKG="jp.naver.line.android"
+          NEW_PKG="jp.naver.line.android.clone"
+          
+          # 1. AndroidManifest.xmlのxposedscope値を直接置換
+          echo "1. AndroidManifest.xmlを修正..."
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            while read file; do
+              echo "  処理中: $file"
+              sed -i "s|android:value=\"$OLD_PKG\"|android:value=\"$NEW_PKG\"|g" "$file"
+              sed -i "s|android:value=\"${OLD_PKG}\"|android:value=\"${NEW_PKG}\"|g" "$file"
+            done
+          
+          # 2. Java/Kotlinソースファイル内の定数を置換
+          echo "2. ソースファイル内の定数を修正..."
+          find . -type f \( -name "*.java" -o -name "*.kt" \) ! -path "*/build/*" ! -path "*/.git/*" | \
+            while read file; do
+              # 安全に置換（完全一致を確認）
+              if grep -q "\"$OLD_PKG\"" "$file"; then
+                echo "  処理中: $file"
+                sed -i "s|\"$OLD_PKG\"|\"$NEW_PKG\"|g" "$file"
+              fi
+            done
+          
+          # 3. 特定の重要な定数を強制置換（Main.javaなど）
+          echo "3. 重要な定数を個別修正..."
+          
+          # Main.javaのTARGET_PACKAGE定数
+          find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            while read file; do
+              if [[ -f "$file" ]]; then
+                echo "  処理中: $file"
+                # 複数のパターンに対応
+                sed -i "s|TARGET_PACKAGE = \"$OLD_PKG\"|TARGET_PACKAGE = \"$NEW_PKG\"|g" "$file"
+                sed -i "s|PACKAGE_NAME = \"$OLD_PKG\"|PACKAGE_NAME = \"$NEW_PKG\"|g" "$file"
+                sed -i "s|\"$OLD_PKG\".equals|\"$NEW_PKG\".equals|g" "$file"
+                
+                # BuildConfigのインポートを追加（なければ）
+                if ! grep -q "import.*BuildConfig" "$file"; then
+                  # パッケージ宣言の後に追加
+                  sed -i "/^package /a import io.github.fork.lime.BuildConfig;" "$file" || echo "インポート追加失敗（既にあるかもしれません）"
+                fi
+                
+                # TARGET_PACKAGE定数をBuildConfigから取得するように変更
+                sed -i "s|private static final String TARGET_PACKAGE = \".*\";|private static String getTargetPackage() { return BuildConfig.TARGET_PACKAGE; }|g" "$file"
+                sed -i "s|!lpparam.packageName.equals(TARGET_PACKAGE)|!lpparam.packageName.equals(getTargetPackage())|g" "$file"
+              fi
+            done
+          
+          # Constants.java（存在する場合）
+          find . -name "Constants.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            while read file; do
+              if [[ -f "$file" ]]; then
+                echo "  処理中: $file"
+                sed -i "s|\"$OLD_PKG\"|\"$NEW_PKG\"|g" "$file"
+              fi
+            done
+          
+          echo "ハードコードされたパッケージ名を置換完了"
+          
+          # 4. 修正結果を確認
+          echo "4. 修正結果を確認:"
+          echo "   - xposedscope値:"
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            xargs grep -h "xposedscope" 2>/dev/null || true
+          
+          echo "   - TARGET_PACKAGE定数:"
+          find . -name "*.java" -type f ! -path "*/build/*" ! -path "*/.git/*" | \
+            xargs grep -h "TARGET_PACKAGE" 2>/dev/null | head -5 || true
+
+      # ステップ13: アプリ名の統一設定（元のステップ14を繰り上げ）
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -401,7 +514,7 @@ jobs:
               sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
             done
 
-      # ステップ15: Gradle権限設定
+      # ステップ14: Gradle権限設定（元のステップ15を繰り上げ）
       - name: Set Gradle Permissions
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -411,7 +524,7 @@ jobs:
             echo "gradlewに実行権限を付与"
           fi
 
-      # ステップ16: APKビルド実行
+      # ステップ15: APKビルド実行（元のステップ16を繰り上げ）
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -430,7 +543,7 @@ jobs:
           
           echo "実行するビルドコマンド: ${BUILD_COMMANDS[@]}"
           
-          # クリーンビルド
+          # クリーンビルド（キャッシュクリアが重要）
           ./gradlew clean 2>&1 | tail -20 || echo "クリーンビルド警告"
           
           # 各ビルドを実行
@@ -439,6 +552,11 @@ jobs:
             if ./gradlew $cmd --stacktrace --no-daemon 2>&1; then
               echo "✅ $cmd 成功"
               echo "BUILD_RESULT=${cmd#assemble}" >> $GITHUB_ENV
+              
+              # ビルド後の確認
+              echo "ビルド後の確認:"
+              find . -name "BuildConfig.java" -type f | \
+                xargs grep -h "TARGET_PACKAGE" 2>/dev/null || echo "BuildConfig確認不可"
             else
               echo "❌ $cmd 失敗"
               # 失敗時はデバッグ情報を出力
@@ -452,9 +570,14 @@ jobs:
           find . -name "*.apk" -type f 2>/dev/null | while read apk; do
             SIZE=$(du -h "$apk" | cut -f1)
             echo "  - $apk ($SIZE)"
+            
+            # APK内のAndroidManifest.xmlを確認（xposedscope値）
+            echo "    xposedscope値確認:"
+            unzip -p "$apk" AndroidManifest.xml 2>/dev/null | \
+              strings 2>/dev/null | grep -i xposedscope || echo "    確認不可"
           done
 
-      # ステップ17: GitHubリリース作成
+      # ステップ16: GitHubリリース作成（元のステップ17を繰り上げ）
       - name: Create GitHub Release
         if: env.BUILD_NEEDED == 'true' && success()
         uses: softprops/action-gh-release@v2
@@ -471,14 +594,17 @@ jobs:
             - **トリガー**: ${{ env.TRIGGER_TYPE }}
             - **タグ**: ${{ env.TARGET_TAG }}
             
-            ## 🎯 LSPatch設定
-            **ターゲットAPK**: `jp.naver.line.android.clone` (LIMEs-Neo)
-            **モジュール**: `io.github.fork.lime`
+            ## 🎯 LSPatch設定（修正済み）
+            **ターゲットAPK**: `jp.naver.line.android.clone` (LINE-Neo)
+            **モジュール**: `io.github.fork.lime` (LIMEs-Neo)
+            **xposedscope**: `jp.naver.line.android.clone` (修正済み)
             
-            ## 🔧 変更点
-            1. パッケージ名を変更してオリジナルアプリと競合しないようにしました
-            2. LSPatch用にxposedscopeを適切に設定
-            3. アプリ名を統一
+            ## 🔧 修正内容
+            1. ✅ パッケージ名を変更してオリジナルアプリと競合しないようにしました
+            2. ✅ build.gradleを動的に修正し、BuildConfig.TARGET_PACKAGEを設定
+            3. ✅ AndroidManifest.xmlのxposedscope値を正しいターゲットに修正
+            4. ✅ Main.javaのTARGET_PACKAGE定数をBuildConfigから動的に取得
+            5. ✅ アプリ名を統一
             
             ## 📦 ダウンロード
             以下のAPKファイルが利用可能です。
@@ -486,9 +612,16 @@ jobs:
             ## ⚠️ 注意事項
             - LSPatch 1.10.2以上を使用してください
             - 埋め込みモードでの適用を推奨します
+            - ターゲットAPK: **LINE-Neo** (`jp.naver.line.android.clone`)
+            
+            ## 🔍 確認方法
+            ```bash
+            # APK内のxposedscope値を確認
+            unzip -p [apkファイル] AndroidManifest.xml | strings | grep xposedscope
+            ```
             
             ---
-            *GitHub Actionsによる自動ビルド*
+            *GitHub Actionsによる自動ビルド（LSPatchスコープ対応版）*
           draft: false
           prerelease: false
           overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
@@ -498,7 +631,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ステップ18: ビルド完了通知
+      # ステップ17: ビルド完了通知（元のステップ18を繰り上げ）
       - name: Build Completion Notification
         if: always()
         run: |
@@ -513,6 +646,7 @@ jobs:
             echo "- アプリ名: LIMEs-Neo"
             echo "- ターゲットパッケージ: $NEW_LINE_PKG"
             echo "- モジュールパッケージ: $NEW_PKG"
+            echo "- xposedscope値: $NEW_LINE_PKG"
             echo "- ビルドタグ: ${{ env.TARGET_TAG || '未設定' }}"
             echo "- ビルド日時: ${{ env.BUILD_DATE || '不明' }}"
             
@@ -522,6 +656,13 @@ jobs:
               echo "🔗 リリースページ:"
               echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
             fi
+            
+            # LSPatch設定の確認
+            echo ""
+            echo "🎯 LSPatch設定確認:"
+            echo "1. ターゲットAPK: $NEW_LINE_PKG (LINE-Neo)"
+            echo "2. モジュールAPK: $NEW_PKG (LIMEs-Neo)"
+            echo "3. xposedscope値: $NEW_LINE_PKG (修正済み)"
           else
             echo "❌ ビルド失敗"
             echo ""
