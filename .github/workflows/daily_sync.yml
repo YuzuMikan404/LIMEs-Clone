@@ -41,21 +41,31 @@ jobs:
           
           echo "Upstream Latest: $SHORT_SHA"
           
-          # タグの存在チェック
+          # 【修正1】ローカルのタグチェックに加えて、リモートのタグもチェック
+          echo "Checking if tag already exists..."
+          
+          # まずローカルでタグを確認
           if git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
-            echo "::notice::Build for commit $SHORT_SHA already exists. Skipping."
+            echo "::notice::Build for commit $SHORT_SHA already exists locally. Skipping."
             echo "BUILD_NEEDED=false" >> $GITHUB_ENV
           else
-            echo "::notice::New commit detected! Starting build..."
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-            echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-            echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
+            # ローカルにない場合、リモートもチェック
+            if git ls-remote --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
+              echo "::notice::Tag $TARGET_TAG already exists on remote. Skipping."
+              echo "BUILD_NEEDED=false" >> $GITHUB_ENV
+            else
+              echo "::notice::New commit detected! Starting build..."
+              echo "BUILD_NEEDED=true" >> $GITHUB_ENV
+              echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+              echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+              echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
+            fi
           fi
 
       - name: Fetch & Checkout Upstream Code
         if: env.BUILD_NEEDED == 'true'
         run: |
+          echo "--- Fetching source code for commit: ${{ env.SHORT_SHA }} ---"
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
@@ -65,20 +75,27 @@ jobs:
       - name: Refactor Package Names
         if: env.BUILD_NEEDED == 'true'
         run: |
+          echo "--- Refactoring Package Names ---"
           OLD_PKG="io.github.hiro.lime"
           OLD_LINE="jp.naver.line.android"
           
+          # 1. 文字列置換
+          echo "Replacing package names in files..."
           find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_PKG/$NEW_PKG/g" {} +
           find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.pro" -o -name "*.properties" \) -exec sed -i "s/$OLD_LINE/$NEW_LINE_PKG/g" {} +
           
+          # 2. フォルダ移動
+          echo "Moving package directories..."
           TARGET_DIRS=$(find . -type d -path "*/io/github/hiro/lime")
           for DIR in $TARGET_DIRS; do
+            echo "Moving $DIR"
             PARENT_DIR=$(dirname "$DIR")
             BASE_DIR=$(dirname "$PARENT_DIR")
             mkdir -p "$BASE_DIR/fork"
             mv "$DIR" "$BASE_DIR/fork/lime"
             rmdir "$PARENT_DIR" || true
           done
+          echo "Refactoring complete."
 
       - name: Setup Java
         if: env.BUILD_NEEDED == 'true'
@@ -91,6 +108,7 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         run: |
           chmod +x gradlew
+          # リリースビルド（失敗時はデバッグビルド）
           ./gradlew assembleRelease || ./gradlew assembleDebug
 
       - name: Create Release
@@ -102,13 +120,21 @@ jobs:
           body: |
             Auto-build from upstream commit: ${{ env.SHORT_SHA }}
             Date: $(date +'%Y-%m-%d')
+            
+            **Source Repository**: [${{ env.SOURCE_REPO }}](https://github.com/${{ env.SOURCE_REPO }})
+            **Commit**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
+            
+            This is an automated build with package name refactored to avoid conflicts with the original app.
           draft: false
           prerelease: false
+          # 【修正2】リリースを上書きする設定（同じタグが存在する場合に上書き）
+          overwrite: true
           files: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      # 【修正点】最後の git push 手順を削除しました。
-      # action-gh-release が自動でタグを作るので、重複エラーを防げます。
+
+      # 【修正3】最後のgit push手順は完全に削除しました
+      # action-gh-releaseがタグを自動で作成・管理します
+      # 手動でタグをプッシュすると重複エラーが発生するため削除
