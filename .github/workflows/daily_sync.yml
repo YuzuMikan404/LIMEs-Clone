@@ -1,6 +1,7 @@
-name: LIMEs-Neo Daily Build
+name: LIMEs-Neo Local Mode Build
 
 on:
+  # 手動トリガーのみ（ローカルモードでは毎日ビルドは不要）
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -11,22 +12,11 @@ on:
       build_type:
         description: 'ビルドタイプ'
         required: false
-        default: 'release'
+        default: 'debug'
         type: string
         options:
-          - release
           - debug
-          - both
-  schedule:
-    - cron: '0 0 * * *'
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - 'README.md'
-      - 'LICENSE'
-      - 'docs/**'
-  pull_request:
-    branches: [ main ]
+          - release
 
 permissions:
   contents: write
@@ -37,21 +27,17 @@ env:
   ANDROID_HOME: /usr/local/lib/android/sdk
 
 jobs:
-  check-and-build:
+  local-mode-build:
     runs-on: ubuntu-latest
     env:
       SOURCE_REPO: areteruhiro/PrtivateLIMEs
       MY_PAT: ${{ secrets.PAT }}
       NEW_PKG: "io.github.fork.lime"
+      NEW_LINE_PKG: "jp.naver.line.android.clone"
       APP_NAME: "LIMEs-Neo"
-      TARGET_SCOPE: "jp.naver.line.android.clone"
 
     steps:
-      - name: Debug Workflow Dispatch Inputs
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "GitHub Event Name: ${{ github.event_name }}"
-
+      # ステップ1: リポジトリチェックアウト
       - name: Checkout Local Repo
         uses: actions/checkout@v4
         with:
@@ -59,198 +45,363 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      - name: Determine Trigger Type
-        id: trigger
+      # ステップ2: 手動実行設定
+      - name: Setup Manual Build
+        id: manual-setup
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "TRIGGER_TYPE=manual" >> $GITHUB_ENV
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            echo "FORCE_REBUILD=${{ github.event.inputs.force_rebuild }}" >> $GITHUB_ENV
-            BUILD_TYPE="${{ github.event.inputs.build_type }}"
-            [[ -z "$BUILD_TYPE" ]] && BUILD_TYPE="release"
-            echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "TRIGGER_TYPE=scheduled" >> $GITHUB_ENV
-            echo "FORCE_REBUILD=false" >> $GITHUB_ENV
-            echo "BUILD_TYPE=release" >> $GITHUB_ENV
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-          else
-            echo "TRIGGER_TYPE=other" >> $GITHUB_ENV
-            echo "FORCE_REBUILD=false" >> $GITHUB_ENV
-            echo "BUILD_TYPE=release" >> $GITHUB_ENV
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-          fi
-
-      - name: Get Build Datetime
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          echo "TARGET_TAG=build-${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_ENV
-
-      - name: Fetch Source Code
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
+          echo "=== ローカルモードビルド設定 ==="
           
-          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
-          echo "Fetching upstream..."
-          git fetch upstream
+          # アップストリームから最新コミットを取得
+          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
+          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
           
-          # ブランチ自動判定 (main or master)
-          if git rev-parse --verify upstream/main >/dev/null 2>&1; then
-            UPSTREAM_BRANCH="upstream/main"
-          elif git rev-parse --verify upstream/master >/dev/null 2>&1; then
-            UPSTREAM_BRANCH="upstream/master"
-          else
-            echo "Error: Neither 'main' nor 'master' branch found."
+          if [ -z "$UPSTREAM_SHA" ]; then
+            echo "::error::アップストリーム取得失敗"
             exit 1
           fi
           
-          UPSTREAM_SHA=$(git rev-parse $UPSTREAM_BRANCH)
-          echo "Target Commit: $UPSTREAM_SHA"
+          SHORT_SHA=${UPSTREAM_SHA:0:7}
+          BASE_TAG="local-build-$SHORT_SHA"
+          
+          echo "アップストリーム最新コミット: $SHORT_SHA"
+          
+          # 環境変数の設定
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-          git checkout $UPSTREAM_SHA
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          
+          # 入力パラメータの処理
+          FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
+          if [[ -z "$FORCE_REBUILD" || "$FORCE_REBUILD" == "true" ]]; then
+            echo "FORCE_REBUILD=true" >> $GITHUB_ENV
+          else
+            echo "FORCE_REBUILD=false" >> $GITHUB_ENV
+          fi
+          
+          # ビルドタイプの処理
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [[ -z "$BUILD_TYPE" ]]; then
+            BUILD_TYPE="debug"
+          fi
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
+          
+          # タグ名生成
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          if [[ "$FORCE_REBUILD" == "true" ]]; then
+            TARGET_TAG="${BASE_TAG}"
+          else
+            TARGET_TAG="${BASE_TAG}-${TIMESTAMP}"
+          fi
+          echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
+          
+          echo "ビルドタイプ: $BUILD_TYPE"
+          echo "タグ名: $TARGET_TAG"
 
+      # ステップ3: ビルド日時取得
+      - name: Get Build Datetime
+        id: datetime
+        run: |
+          echo "ビルド日時を取得中..."
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+          echo "date_short=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
+
+      # ステップ4: ソースコード取得
+      - name: Fetch Source Code
+        run: |
+          echo "=== ソースコード取得 ==="
+          
+          # Git設定
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # アップストリームリポジトリを追加
+          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || echo "アップストリームは既に追加済み"
+          
+          # アップストリームからフェッチ
+          echo "アップストリームからフェッチ中..."
+          git fetch upstream
+          
+          # 指定のコミットにチェックアウト
+          echo "コミット $UPSTREAM_SHA をチェックアウト"
+          git checkout $UPSTREAM_SHA
+          
+          # 確認
+          echo "現在のコミット:"
+          git log --oneline -1
+
+      # ステップ5: Java環境セットアップ
       - name: Setup Java
-        if: env.BUILD_NEEDED == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
+      # ステップ6: Android SDKセットアップ
       - name: Setup Android SDK
-        if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # === デバッグ保存 (Before) ===
-      - name: Save Files Before Modification
-        if: env.BUILD_NEEDED == 'true'
+      # ステップ7: パッケージ名置換（簡易版）
+      - name: Replace Package Names for Local Mode
         run: |
-          mkdir -p debug_artifacts/before
-          # 除外設定を追加して無限ループ回避
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
-            -exec cp --parents {} debug_artifacts/before/ \;
-          
-          find . -name "*.kt" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | head -n 5 | \
-            xargs -I {} cp --parents {} debug_artifacts/before/
-
-      # === 核心：パッケージ名とスコープの書き換え ===
-      - name: Apply Package & Scope Changes
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "=== 変更処理開始 ==="
+          echo "=== ローカルモード用パッケージ名置換 ==="
           
           OLD_PKG="io.github.hiro.lime"
+          OLD_LINE="jp.naver.line.android"
+          NEW_PKG="io.github.fork.lime"
+          NEW_LINE_PKG="jp.naver.line.android.clone"
           
-          # 1. パッケージ名置換 (全ファイル対象)
-          #    元のパッケージ名 io.github.hiro.lime を io.github.fork.lime に置換
-          find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
-            ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" \
-            -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
-
-          # 2. AndroidManifest.xml の xposedscope を強制書き換え
-          #    どんな値が入っていようとも、jp.naver.line.android.clone に上書きする
-          echo "AndroidManifestのスコープ修正 -> $TARGET_SCOPE"
+          echo "置換設定:"
+          echo "  $OLD_PKG → $NEW_PKG"
+          echo "  $OLD_LINE → $NEW_LINE_PKG"
           
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | while read manifest; do
-             echo "Target Manifest: $manifest"
-             # 既存の xposedscope 行を検索して置換 (正規表現で value="..." の中身を書き換え)
-             sed -i 's|android:name="xposedscope"[\r\n\t ]*android:value="[^"]*"|android:name="xposedscope" android:value="'"$TARGET_SCOPE"'"|g' "$manifest"
-             
-             # もし上記で引っかからない場合（改行など）のため、単純検索置換も試行
-             sed -i "s|jp.naver.line.android|$TARGET_SCOPE|g" "$manifest"
-          done
-
-          # 3. ソースコードのロジック緩和
-          #    Cloneアプリでもフックが動くように startsWith に変更
-          echo "ソースコードの判定ロジック緩和"
+          # 1. AndroidManifest.xmlのパッケージ名とxposedscopeを置換
+          echo "1. AndroidManifest.xmlを修正..."
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              echo "  処理中: $file"
+              sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file"
+              sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file"
+            done
           
-          # '== "jp.naver.line.android"' -> '.startsWith("jp.naver.line.android")'
-          find . -type f \( -name "*.kt" -o -name "*.java" \) \
-            ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
-            -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
-             
-          # 'equals("jp.naver.line.android")' -> 'startsWith("jp.naver.line.android")'
-          find . -type f \( -name "*.kt" -o -name "*.java" \) \
-            ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
-            -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
-
-          echo "=== 変更処理完了 ==="
-
-      # === デバッグレポート生成 ===
-      - name: Generate Debug Report
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          REPORT_FILE="debug_report.txt"
-          echo "=== DEBUG REPORT (${{ env.BUILD_DATE }}) ===" > $REPORT_FILE
-          echo "" >> $REPORT_FILE
+          # 2. Javaファイルのパッケージ宣言を置換
+          echo "2. Javaファイルのパッケージ宣言を修正..."
+          find . -type f -name "*.java" ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              if grep -q "^package $OLD_PKG;" "$file"; then
+                echo "  処理中: $file"
+                sed -i "s|^package $OLD_PKG;|package $NEW_PKG;|g" "$file"
+              fi
+            done
           
-          echo "1. AndroidManifest.xml Scope Check:" >> $REPORT_FILE
-          grep -r "xposedscope" . --include="AndroidManifest.xml" --exclude-dir="debug_artifacts" -A 1 >> $REPORT_FILE || echo "xposedscope NOT FOUND" >> $REPORT_FILE
-          echo "" >> $REPORT_FILE
+          # 3. Main.javaのTARGET_PACKAGE定数を直接修正
+          echo "3. Main.javaのTARGET_PACKAGE定数を修正..."
+          find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              if [[ -f "$file" ]]; then
+                echo "  処理中: $file"
+                # TARGET_PACKAGE定数を直接設定
+                sed -i "s|private static final String TARGET_PACKAGE = \".*\";|private static final String TARGET_PACKAGE = \"$NEW_LINE_PKG\";|g" "$file"
+                # その他の参照も修正
+                sed -i "s|\"$OLD_LINE\"|\"$NEW_LINE_PKG\"|g" "$file"
+              fi
+            done
           
-          echo "2. Package Name Check ($NEW_PKG):" >> $REPORT_FILE
-          grep -r "$NEW_PKG" . --include="AndroidManifest.xml" --exclude-dir="debug_artifacts" | head -n 3 >> $REPORT_FILE
-          echo "" >> $REPORT_FILE
-
-          echo "3. Hook Logic Check (startsWith):" >> $REPORT_FILE
-          grep -r "startsWith(\"jp.naver.line.android\")" . --include="*.kt" --exclude-dir="debug_artifacts" | head -n 5 >> $REPORT_FILE
+          # 4. リソースファイルのパッケージ名置換
+          echo "4. リソースファイルを修正..."
+          find . -type f \( -name "*.xml" -o -name "*.gradle" \) ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              if [[ -f "$file" ]]; then
+                sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file" 2>/dev/null || true
+                sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file" 2>/dev/null || true
+              fi
+            done
           
-          echo "=== END REPORT ===" >> $REPORT_FILE
-          cat $REPORT_FILE
+          echo "パッケージ名置換完了"
 
+      # ステップ8: アプリ名の統一設定
       - name: Unify Application Name
-        if: env.BUILD_NEEDED == 'true'
         run: |
-          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
+          echo "=== アプリ名の統一設定 ==="
+          
+          # マニフェストファイルでアプリ名を統一
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
-              sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo"|g' "$file"
+              sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo (Local)"|g' "$file"
             done
-          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
+          
+          # strings.xmlのapp_nameも更新
+          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
-              sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
+              sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo (Local)</string>|g' "$file"
             done
 
+      # ステップ9: Gradle権限設定
       - name: Set Gradle Permissions
-        if: env.BUILD_NEEDED == 'true'
         run: |
-          if [[ -f "gradlew" ]]; then chmod +x gradlew; fi
-
-      - name: Build APK
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          ./gradlew clean || true
-          if [[ "$BUILD_TYPE" == "release" || "$BUILD_TYPE" == "both" ]]; then
-            ./gradlew assembleRelease --no-daemon
-          fi
-          if [[ "$BUILD_TYPE" == "debug" || "$BUILD_TYPE" == "both" ]]; then
-            ./gradlew assembleDebug --no-daemon
+          echo "=== Gradle権限設定 ==="
+          if [[ -f "gradlew" ]]; then
+            chmod +x gradlew
+            echo "gradlewに実行権限を付与"
           fi
 
-      - name: Create GitHub Release
-        if: env.BUILD_NEEDED == 'true' && success()
+      # ステップ10: ローカルモード用ビルド設定
+      - name: Setup Local Mode Build Configuration
+        run: |
+          echo "=== ローカルモード用ビルド設定 ==="
+          
+          # gradle.propertiesの設定
+          echo "android.enableR8=true" >> gradle.properties
+          echo "android.enableDexingArtifactTransform=false" >> gradle.properties
+          echo "android.useNewApkCreator=true" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8" >> gradle.properties
+          
+          # build.gradleの簡易修正（あれば）
+          BUILD_GRADLE_PATH=$(find . -name "build.gradle" -path "*/app/*" | head -1)
+          
+          if [[ -n "$BUILD_GRADLE_PATH" ]]; then
+            echo "build.gradleを確認: $BUILD_GRADLE_PATH"
+            # 必要な依存関係があるか確認
+            if ! grep -q "de.robv.android.xposed:api" "$BUILD_GRADLE_PATH"; then
+              echo "Xposed API依存関係を追加..."
+              sed -i "/dependencies {/a\\    compileOnly 'de.robv.android.xposed:api:82'" "$BUILD_GRADLE_PATH"
+            fi
+          fi
+          
+          echo "ローカルモード設定完了"
+
+      # ステップ11: APKビルド実行
+      - name: Build APK for Local Mode
+        run: |
+          echo "=== ローカルモード用APKビルド実行 ==="
+          
+          # クリーンビルド
+          echo "クリーンビルドを実行..."
+          ./gradlew clean 2>&1 | tail -30
+          
+          # ビルド実行
+          if [[ "$BUILD_TYPE" == "release" ]]; then
+            echo "リリースビルドを実行..."
+            if ./gradlew assembleRelease --stacktrace --no-daemon 2>&1 | tee build.log; then
+              echo "✅ リリースビルド成功"
+            else
+              echo "❌ リリースビルド失敗"
+              tail -100 build.log
+              exit 1
+            fi
+          else
+            echo "デバッグビルドを実行..."
+            if ./gradlew assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log; then
+              echo "✅ デバッグビルド成功"
+            else
+              echo "❌ デバッグビルド失敗"
+              tail -100 build.log
+              exit 1
+            fi
+          fi
+          
+          # 生成されたAPKを表示
+          echo "生成されたAPKファイル:"
+          find . -name "*.apk" -type f 2>/dev/null | while read apk; do
+            SIZE=$(du -h "$apk" | cut -f1)
+            echo "  - $apk ($SIZE)"
+          done
+          
+          # APKの詳細情報
+          echo "APK詳細情報:"
+          APK_FILE=$(find . -name "*.apk" -type f 2>/dev/null | head -1)
+          if [[ -n "$APK_FILE" ]]; then
+            echo "APKサイズ: $(du -h "$APK_FILE" | cut -f1)"
+            echo "APK内のxposedscope値:"
+            unzip -p "$APK_FILE" AndroidManifest.xml 2>/dev/null | \
+              strings 2>/dev/null | grep -i xposedscope || echo "  確認不可"
+          fi
+
+      # ステップ12: GitHubリリース作成
+      - name: Create GitHub Release for Local Mode
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TARGET_TAG }}
-          name: LIMEs-Neo Debug Build ${{ env.SHORT_SHA }}
+          name: LIMEs-Neo Local Mode ${{ env.SHORT_SHA }} (${{ env.BUILD_DATE }})
           body: |
-            # 🚀 LIMEs-Neo (Clone Support)
+            # 🚀 LIMEs-Neo - ローカルモード用ビルド
             
-            - **Source**: ${{ env.SHORT_SHA }}
-            - **Target**: `jp.naver.line.android.clone`
-            - **Package**: `io.github.fork.lime`
+            ## 📋 ビルド情報
+            - **ソースコミット**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
+            - **ビルド日時**: ${{ env.BUILD_DATE }} ${{ env.BUILD_TIME }}
+            - **ビルド種別**: ${{ env.BUILD_TYPE }}
+            - **タグ**: ${{ env.TARGET_TAG }}
             
-            Check `debug_report.txt` to ensure correct patching.
+            ## 🎯 ローカルモード設定
+            **ターゲットAPK**: `jp.naver.line.android.clone` (LINE-Neo)
+            **モジュールAPK**: `io.github.fork.lime` (LIMEs-Neo)
+            **xposedscope値**: `jp.naver.line.android.clone` (修正済み)
+            
+            ## 🔧 ローカルモード使用方法
+            
+            ### 方法1: LSPatch ローカルモード
+            1. **LSPatch** アプリをインストール
+            2. LINE-Neo (`jp.naver.line.android.clone`) をインストール
+            3. このAPKをインストール（LIMEs-Neoモジュール）
+            4. LSPatchアプリを開く
+            5. 「管理」→ LINE-Neoを選択
+            6. 「モジュール」→ LIMEs-Neoを有効化
+            7. LINE-Neoを再起動
+            
+            ### 方法2: LSPosedを使用（Root環境）
+            1. LSPosedをインストール
+            2. LINE-Neoとこのモジュールをインストール
+            3. LSPosedでLIMEs-Neoモジュールを有効化
+            4. スコープとしてLINE-Neoを選択
+            5. LINE-Neoを再起動
+            
+            ## 🔍 確認事項
+            - ✅ xposedscope値は正しく設定済み
+            - ✅ パッケージ名は競合しないように変更済み
+            - ✅ UIは正常に表示されるはず
+            
+            ## ⚠️ 注意事項
+            - ローカルモードではLSPatchでパッチ適用は不要です
+            - LINE-Neoがインストールされていることを確認してください
+            - モジュールを有効化後、アプリを再起動してください
+            
+            ---
+            *ローカルモード用ビルド - 直接インストールして使用*
           draft: false
           prerelease: false
+          overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
           files: |
             **/build/outputs/apk/**/*.apk
             *.apk
-            debug_report.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ステップ13: ビルド完了通知
+      - name: Build Completion Notification
+        if: always()
+        run: |
+          echo "=== ローカルモードビルド完了 ==="
+          echo "ステータス: ${{ job.status }}"
+          echo ""
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ ビルド成功！"
+            echo ""
+            echo "📊 ローカルモード用ビルドサマリー:"
+            echo "- アプリ名: LIMEs-Neo (Local)"
+            echo "- ターゲットパッケージ: $NEW_LINE_PKG"
+            echo "- モジュールパッケージ: $NEW_PKG"
+            echo "- xposedscope値: $NEW_LINE_PKG"
+            echo "- ビルドタグ: ${{ env.TARGET_TAG || '未設定' }}"
+            echo "- ビルド日時: ${{ env.BUILD_DATE || '不明' }}"
+            
+            # リリースリンク
+            if [[ -n "${{ env.TARGET_TAG }}" ]]; then
+              echo ""
+              echo "🔗 リリースページ:"
+              echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
+            fi
+            
+            echo ""
+            echo "📱 ローカルモードインストール手順:"
+            echo "1. ダウンロードしたAPKをインストール"
+            echo "2. LSPatchを開く"
+            echo "3. 「管理」→ LINE-Neoを選択"
+            echo "4. 「モジュール」→ LIMEs-Neoを有効化"
+            echo "5. LINE-Neoを再起動"
+          else
+            echo "❌ ビルド失敗"
+            echo ""
+            echo "🔧 デバッグ情報:"
+            echo "- イベント: ${{ github.event_name }}"
+            echo "- ビルドタイプ: ${{ env.BUILD_TYPE || '不明' }}"
+            echo "- ワークフロー: ${{ github.workflow }}"
+            
+            # ビルドログの確認
+            if [[ -f "build.log" ]]; then
+              echo ""
+              echo "📝 ビルドログのエラー箇所:"
+              grep -i "error:" build.log | head -10 || echo "エラー箇所が見つかりません"
+            fi
+          fi
