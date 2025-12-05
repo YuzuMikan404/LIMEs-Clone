@@ -44,6 +44,7 @@ jobs:
       MY_PAT: ${{ secrets.PAT }}
       NEW_PKG: "io.github.fork.lime"
       APP_NAME: "LIMEs-Neo"
+      TARGET_SCOPE: "jp.naver.line.android.clone"
 
     steps:
       - name: Debug Workflow Dispatch Inputs
@@ -95,11 +96,12 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
           echo "Fetching upstream..."
           git fetch upstream
           
-          # ブランチ自動判定
+          # ブランチ自動判定 (main or master)
           if git rev-parse --verify upstream/main >/dev/null 2>&1; then
             UPSTREAM_BRANCH="upstream/main"
           elif git rev-parse --verify upstream/master >/dev/null 2>&1; then
@@ -125,43 +127,62 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # === 以下、修正の核心部分 ===
+      # === デバッグ保存 (Before) ===
+      - name: Save Files Before Modification
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          mkdir -p debug_artifacts/before
+          # 除外設定を追加して無限ループ回避
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
+            -exec cp --parents {} debug_artifacts/before/ \;
+          
+          find . -name "*.kt" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | head -n 5 | \
+            xargs -I {} cp --parents {} debug_artifacts/before/
 
+      # === 核心：パッケージ名とスコープの書き換え ===
       - name: Apply Package & Scope Changes
         if: env.BUILD_NEEDED == 'true'
         run: |
           echo "=== 変更処理開始 ==="
+          
           OLD_PKG="io.github.hiro.lime"
-          NEW_PKG="io.github.fork.lime"
           
           # 1. パッケージ名置換 (全ファイル対象)
+          #    元のパッケージ名 io.github.hiro.lime を io.github.fork.lime に置換
           find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
-            ! -path "*/build/*" ! -path "*/.git/*" \
+            ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" \
             -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
 
-          # 2. AndroidManifest.xml の xposedscope を強制書き換え (Clone対応)
-          #    確実に1行ヒットさせて書き換える
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" | while read manifest; do
-             # 念のため置換前の状態を確認
-             grep "xposedscope" "$manifest" || true
-             # 置換実行
-             sed -i 's|android:value="jp.naver.line.android"|android:value="jp.naver.line.android.clone"|g' "$manifest"
+          # 2. AndroidManifest.xml の xposedscope を強制書き換え
+          #    どんな値が入っていようとも、jp.naver.line.android.clone に上書きする
+          echo "AndroidManifestのスコープ修正 -> $TARGET_SCOPE"
+          
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" ! -path "*/debug_artifacts/*" | while read manifest; do
+             echo "Target Manifest: $manifest"
+             # 既存の xposedscope 行を検索して置換 (正規表現で value="..." の中身を書き換え)
+             sed -i 's|android:name="xposedscope"[\r\n\t ]*android:value="[^"]*"|android:name="xposedscope" android:value="'"$TARGET_SCOPE"'"|g' "$manifest"
+             
+             # もし上記で引っかからない場合（改行など）のため、単純検索置換も試行
+             sed -i "s|jp.naver.line.android|$TARGET_SCOPE|g" "$manifest"
           done
 
-          # 3. ソースコードのロジック緩和 (Clone対応)
-          #    完全一致(==) を 前方一致(.startsWith) に変更
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-             -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
+          # 3. ソースコードのロジック緩和
+          #    Cloneアプリでもフックが動くように startsWith に変更
+          echo "ソースコードの判定ロジック緩和"
+          
+          # '== "jp.naver.line.android"' -> '.startsWith("jp.naver.line.android")'
+          find . -type f \( -name "*.kt" -o -name "*.java" \) \
+            ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
+            -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
              
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-             -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
-             
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-             -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
+          # 'equals("jp.naver.line.android")' -> 'startsWith("jp.naver.line.android")'
+          find . -type f \( -name "*.kt" -o -name "*.java" \) \
+            ! -path "*/build/*" ! -path "*/debug_artifacts/*" \
+            -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
 
           echo "=== 変更処理完了 ==="
 
-      # === 【NEW】デバッグレポート生成（ここに注目） ===
+      # === デバッグレポート生成 ===
       - name: Generate Debug Report
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -170,36 +191,27 @@ jobs:
           echo "" >> $REPORT_FILE
           
           echo "1. AndroidManifest.xml Scope Check:" >> $REPORT_FILE
-          echo "-----------------------------------" >> $REPORT_FILE
-          # xposedscopeを含む行を抽出して表示
-          grep -r "xposedscope" . --include="AndroidManifest.xml" -A 1 >> $REPORT_FILE || echo "xposedscope NOT FOUND" >> $REPORT_FILE
+          grep -r "xposedscope" . --include="AndroidManifest.xml" --exclude-dir="debug_artifacts" -A 1 >> $REPORT_FILE || echo "xposedscope NOT FOUND" >> $REPORT_FILE
           echo "" >> $REPORT_FILE
           
-          echo "2. Package Name Check (io.github.fork.lime):" >> $REPORT_FILE
-          echo "-----------------------------------" >> $REPORT_FILE
-          # 新しいパッケージ名が含まれているか確認
-          grep -r "io.github.fork.lime" . --include="AndroidManifest.xml" | head -n 3 >> $REPORT_FILE
+          echo "2. Package Name Check ($NEW_PKG):" >> $REPORT_FILE
+          grep -r "$NEW_PKG" . --include="AndroidManifest.xml" --exclude-dir="debug_artifacts" | head -n 3 >> $REPORT_FILE
           echo "" >> $REPORT_FILE
 
           echo "3. Hook Logic Check (startsWith):" >> $REPORT_FILE
-          echo "-----------------------------------" >> $REPORT_FILE
-          # 前方一致に変更されたロジックを検索して表示
-          grep -r "startsWith(\"jp.naver.line.android\")" . --include="*.kt" | head -n 5 >> $REPORT_FILE || echo "Hook logic modification FAILED" >> $REPORT_FILE
+          grep -r "startsWith(\"jp.naver.line.android\")" . --include="*.kt" --exclude-dir="debug_artifacts" | head -n 5 >> $REPORT_FILE
           
-          echo "" >> $REPORT_FILE
           echo "=== END REPORT ===" >> $REPORT_FILE
-          
-          # ログにも出力（コピペ用）
           cat $REPORT_FILE
 
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
         run: |
-          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
             while read file; do
               sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo"|g' "$file"
             done
-          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" ! -path "*/debug_artifacts/*" 2>/dev/null | \
             while read file; do
               sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
             done
@@ -227,12 +239,13 @@ jobs:
           tag_name: ${{ env.TARGET_TAG }}
           name: LIMEs-Neo Debug Build ${{ env.SHORT_SHA }}
           body: |
-            # 🛠 Debug Build
+            # 🚀 LIMEs-Neo (Clone Support)
             
             - **Source**: ${{ env.SHORT_SHA }}
-            - **Target**: jp.naver.line.android.clone
+            - **Target**: `jp.naver.line.android.clone`
+            - **Package**: `io.github.fork.lime`
             
-            Please verify `debug_report.txt` to ensure patching was successful.
+            Check `debug_report.txt` to ensure correct patching.
           draft: false
           prerelease: false
           files: |
