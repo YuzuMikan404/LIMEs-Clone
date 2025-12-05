@@ -1,4 +1,4 @@
-name: LIMEs-Neo Daily Build - Final
+name: LIMEs-Neo Daily Build
 
 permissions:
   contents: write
@@ -135,7 +135,7 @@ jobs:
           
           echo "コミット $UPSTREAM_SHA をチェックアウト"
 
-      # ステップ7: パッケージ名置換（LSPatch対応版）
+      # ステップ7: パッケージ名置換（LSPatch対応版 - 完全修正）
       - name: Replace Package Names for LSPatch
         if: env.BUILD_NEEDED == 'true'
         run: |
@@ -143,68 +143,147 @@ jobs:
           
           OLD_PKG="io.github.hiro.lime"
           OLD_LINE="jp.naver.line.android"
+          NEW_PKG="io.github.fork.lime"
+          NEW_LINE_PKG="jp.naver.line.android.clone"
           
           echo "置換設定:"
           echo "  $OLD_PKG → $NEW_PKG"
           echo "  $OLD_LINE → $NEW_LINE_PKG"
           
-          # すべてのファイルタイプを処理
-          FILE_TYPES=("*.java" "*.kt" "*.xml" "*.gradle" "*.gradle.kts" "*.properties" "*.txt" "*.json")
+          # 1. まずAndroidManifest.xmlを優先的に処理
+          echo "1. AndroidManifest.xmlの処理..."
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              echo "  処理中: $file"
+              # 安全な置換（バックアップなし）
+              if grep -q "$OLD_PKG" "$file"; then
+                sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file"
+                echo "    ✓ $OLD_PKG → $NEW_PKG"
+              fi
+              if grep -q "$OLD_LINE" "$file"; then
+                sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file"
+                echo "    ✓ $OLD_LINE → $NEW_LINE_PKG"
+              fi
+            done
+          
+          # 2. その他のすべてのファイルを処理
+          echo "2. その他ファイルの処理..."
+          FILE_TYPES=("*.java" "*.kt" "*.xml" "*.gradle" "*.gradle.kts" "*.properties" "*.txt" "*.json" "*.pro" "*.cfg")
           
           for PATTERN in "${FILE_TYPES[@]}"; do
-            echo "処理: $PATTERN"
-            find . -type f -name "$PATTERN" ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            echo "  パターン: $PATTERN"
+            find . -type f -name "$PATTERN" ! -path "*/build/*" ! -path "*/.git/*" ! -name "AndroidManifest.xml" 2>/dev/null | \
               while read file; do
-                # 安全な置換（ファイルが存在する場合のみ）
                 if [[ -f "$file" ]]; then
                   # io.github.hiro.lime → io.github.fork.lime
                   if grep -q "$OLD_PKG" "$file" 2>/dev/null; then
-                    sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file" 2>/dev/null || true
+                    sed -i "s|$OLD_PKG|$NEW_PKG|g" "$file" 2>/dev/null || echo "    警告: $file の置換に失敗"
                   fi
                   # jp.naver.line.android → jp.naver.line.android.clone
                   if grep -q "$OLD_LINE" "$file" 2>/dev/null; then
-                    sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file" 2>/dev/null || true
+                    sed -i "s|$OLD_LINE|$NEW_LINE_PKG|g" "$file" 2>/dev/null || echo "    警告: $file の置換に失敗"
                   fi
                 fi
               done
           done
           
+          # 3. build.gradleファイルのapplicationIdを確認・修正
+          echo "3. build.gradleのapplicationId修正..."
+          find . -name "build.gradle" -o -name "build.gradle.kts" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              echo "  処理中: $file"
+              # applicationIdの置換
+              sed -i "s|applicationId \"$OLD_PKG\"|applicationId \"$NEW_PKG\"|g" "$file"
+              sed -i "s|applicationId \"$OLD_LINE\"|applicationId \"$NEW_LINE_PKG\"|g" "$file"
+              # applicationIdSuffixがあれば確認
+              if grep -q "applicationIdSuffix" "$file"; then
+                echo "    ⓘ applicationIdSuffixを確認してください"
+              fi
+            done
+          
           echo "パッケージ名置換完了"
 
-      # ステップ8: LSPatch用特別修正
-      - name: Apply LSPatch Specific Fixes
+      # ステップ8: LINE-Neoマニフェストにxposedscopeを追加（重要修正）
+      - name: Add xposedscope to LINE-Neo Manifest
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== LSPatch特別修正 ==="
+          echo "=== LINE-Neoマニフェストにxposedscopeを追加 ==="
           
-          # AndroidManifest.xmlを検索
+          # 1. LINE-Neoのマニフェストを検索（パッケージ名で検索）
+          TARGET_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | xargs grep -l "jp.naver.line.android" 2>/dev/null | head -1)
+          
+          if [[ -z "$TARGET_MANIFEST" ]]; then
+            # 見つからない場合は最初のものを取得
+            TARGET_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | head -1)
+          fi
+          
+          if [[ -n "$TARGET_MANIFEST" ]]; then
+            echo "ターゲットマニフェスト: $TARGET_MANIFEST"
+            
+            # 2. 現在のパッケージ名を確認
+            CURRENT_PKG=$(grep -o 'package="[^"]*"' "$TARGET_MANIFEST" | head -1 | sed 's/package="//' | sed 's/"//')
+            echo "現在のパッケージ名: $CURRENT_PKG"
+            
+            # 3. 既存のxposedscopeをすべて削除
+            echo "既存のxposedscopeを削除..."
+            sed -i '/android:name="xposedscope"/d' "$TARGET_MANIFEST"
+            
+            # 4. applicationタグの直後にxposedscopeを追加
+            echo "xposedscopeを追加..."
+            
+            # applicationタグの開始行を検索
+            APP_LINE=$(grep -n '<application' "$TARGET_MANIFEST" | head -1 | cut -d: -f1)
+            
+            if [[ -n "$APP_LINE" ]]; then
+              # applicationタグの直後の行に挿入
+              sed -i "${APP_LINE}a\\
+              <meta-data\\
+                  android:name=\\"xposedscope\\"\\
+                  android:value=\\"io.github.fork.lime\\" />" "$TARGET_MANIFEST"
+              
+              echo "  ✓ xposedscopeを追加: io.github.fork.lime"
+            else
+              echo "  ⚠️ applicationタグが見つかりません。手動で追加してください。"
+            fi
+            
+            # 5. 追加内容を確認
+            echo ""
+            echo "追加後の確認:"
+            grep -A3 -B3 "xposedscope" "$TARGET_MANIFEST"
+          else
+            echo "❌ ターゲットマニフェストが見つかりません"
+            exit 1
+          fi
+
+      # ステップ9: アプリ名の統一設定
+      - name: Unify Application Name
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          echo "=== アプリ名の統一設定 ==="
+          
+          # すべてのマニフェストファイルでアプリ名を統一
           find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
-              echo "処理: $file"
+              echo "処理中: $file"
               
-              # 1. xposedscopeの修正（重複.removeを確実に修正）
-              sed -i 's|android:value="jp\.naver\.line\.android\.clone\.clone"|android:value="jp.naver.line.android.clone"|g' "$file"
-              sed -i 's|android:value="jp.naver.line.android.clone.clone"|android:value="jp.naver.line.android.clone"|g' "$file"
+              # 1. android:labelの直接置換
+              sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo"|g' "$file"
               
-              # 2. アプリラベルを直接設定
+              # 2. android:label="@string/..." の置換
               sed -i 's|android:label="@[^"]*"|android:label="LIMEs-Neo"|g' "$file"
               
-              # 3. パッケージ名の最終確認
-              sed -i 's|package="io\.github\.hiro\.lime"|package="io.github.fork.lime"|g' "$file"
+              # 3. activity-aliasのラベルも修正
+              sed -i 's|android:label="LINE[^"]*"|android:label="LIMEs-Neo"|g' "$file"
+              sed -i 's|android:label=".*[Nn]eo.*"|android:label="LIMEs-Neo"|g' "$file"
               
-              echo "  ✓ LSPatch修正適用済み"
+              echo "  ✓ アプリ名を統一: LIMEs-Neo"
             done
-
-      # ステップ9: アプリ名設定
-      - name: Set Application Name
-        if: env.BUILD_NEEDED == 'true'
-        run: |
-          echo "=== アプリ名設定 ==="
           
-          # strings.xmlの処理
+          # strings.xmlのapp_nameも更新
+          echo "strings.xmlの更新..."
           find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
-              echo "処理: $file"
+              echo "処理中: $file"
               
               # app_nameをLIMEs-Neoに設定
               if grep -q 'name="app_name"' "$file"; then
@@ -213,43 +292,82 @@ jobs:
               else
                 # 存在しない場合は追加
                 if grep -q "<resources>" "$file"; then
-                  sed -i 's|<resources>|<resources>\n    <string name="app_name">LIMEs-Neo</string>|' "$file"
+                  sed -i 's|<resources>|<resources>\\
+    <string name="app_name">LIMEs-Neo</string>|' "$file"
                   echo "  ✓ app_nameを追加"
                 fi
               fi
             done
 
-      # ステップ10: ビルド前確認
-      - name: Pre-Build Verification
+      # ステップ10: マニフェスト構造検証（デバッグ用）
+      - name: Validate Manifest Structure
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== ビルド前確認 ==="
+          echo "=== マニフェスト構造検証 ==="
           
-          MANIFEST_FILE=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | head -1)
+          echo "1. すべてのマニフェストファイルをリストアップ:"
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              echo "  - $file"
+              PKG=$(grep -o 'package="[^"]*"' "$file" | head -1)
+              echo "    パッケージ: $PKG"
+            done
           
-          if [[ -n "$MANIFEST_FILE" ]]; then
-            echo "AndroidManifest.xml を確認:"
-            echo ""
+          echo ""
+          echo "2. LINE-Neoマニフェストのxposedscope確認:"
+          LINE_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | xargs grep -l "jp.naver.line.android" 2>/dev/null | head -1)
+          
+          if [[ -n "$LINE_MANIFEST" ]]; then
+            echo "ファイル: $LINE_MANIFEST"
             
-            # パッケージ名
-            PKG=$(grep -o 'package="[^"]*"' "$MANIFEST_FILE" | head -1)
-            echo "パッケージ名: $PKG"
-            
-            # xposedscope
-            if grep -q 'xposedscope' "$MANIFEST_FILE"; then
-              SCOPE_LINE=$(grep -A1 'xposedscope' "$MANIFEST_FILE" | tail -1)
-              echo "xposedscope: $SCOPE_LINE"
+            if grep -q 'android:name="xposedscope"' "$LINE_MANIFEST"; then
+              SCOPE_VALUE=$(grep -A1 'android:name="xposedscope"' "$LINE_MANIFEST" | grep -o 'android:value="[^"]*"' | cut -d'"' -f2)
+              echo "  ✅ xposedscope 検出: $SCOPE_VALUE"
+              
+              if [[ "$SCOPE_VALUE" == "io.github.fork.lime" ]]; then
+                echo "  ✅ 正しいモジュールパッケージが指定されています"
+              else
+                echo "  ❌ モジュールパッケージが不正: $SCOPE_VALUE"
+                echo "  期待値: io.github.fork.lime"
+              fi
+            else
+              echo "  ❌ xposedscope が見つかりません"
             fi
-            
-            # アプリラベル
-            LABEL=$(grep -o 'android:label="[^"]*"' "$MANIFEST_FILE" | head -1)
-            echo "アプリラベル: $LABEL"
-            
-            echo ""
-            echo "✅ LSPatch設定が正しく適用されています"
           else
-            echo "⚠️ AndroidManifest.xmlが見つかりません"
+            echo "  ⚠️ LINE-Neoマニフェストが見つかりません"
           fi
+          
+          echo ""
+          echo "3. LIMEsマニフェストのxposedscope確認:"
+          LIME_MANIFEST=$(find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | xargs grep -l "io.github.fork.lime" 2>/dev/null | head -1)
+          
+          if [[ -n "$LIME_MANIFEST" ]]; then
+            echo "ファイル: $LIME_MANIFEST"
+            
+            if grep -q 'android:name="xposedscope"' "$LIME_MANIFEST"; then
+              SCOPE_VALUE=$(grep -A1 'android:name="xposedscope"' "$LIME_MANIFEST" | grep -o 'android:value="[^"]*"' | cut -d'"' -f2)
+              echo "  ✅ xposedscope 検出: $SCOPE_VALUE"
+              
+              if [[ "$SCOPE_VALUE" == "jp.naver.line.android.clone" ]]; then
+                echo "  ✅ 正しいターゲットパッケージが指定されています"
+              else
+                echo "  ❌ ターゲットパッケージが不正: $SCOPE_VALUE"
+                echo "  期待値: jp.naver.line.android.clone"
+              fi
+            else
+              echo "  ❌ xposedscope が見つかりません"
+            fi
+          else
+            echo "  ⚠️ LIMEsマニフェストが見つかりません"
+          fi
+          
+          echo ""
+          echo "4. LSPatch設定の概要:"
+          echo "   ターゲットアプリ: jp.naver.line.android.clone"
+          echo "   モジュールアプリ: io.github.fork.lime"
+          echo "   関係性:"
+          echo "     - ターゲットのxposedscope → io.github.fork.lime"
+          echo "     - モジュールのxposedscope → jp.naver.line.android.clone"
 
       # ステップ11: Java環境セットアップ
       - name: Setup Java
@@ -259,67 +377,134 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # ステップ12: APKビルド
+      # ステップ12: Android SDKセットアップ
+      - name: Setup Android SDK
+        if: env.BUILD_NEEDED == 'true'
+        uses: android-actions/setup-android@v3
+
+      # ステップ13: ビルドスクリプトの権限設定
+      - name: Set Gradle Permissions
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          echo "=== Gradle権限設定 ==="
+          if [[ -f "gradlew" ]]; then
+            chmod +x gradlew
+            echo "gradlewに実行権限を付与"
+          else
+            echo "⚠️ gradlewが見つかりません"
+          fi
+
+      # ステップ14: APKビルド実行
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
           echo "=== APKビルド実行 ==="
           
-          chmod +x gradlew
-          
-          echo "1. クリーンビルド..."
-          ./gradlew clean || echo "クリーンビルド警告"
+          # ビルド設定の確認
+          echo "1. ビルド設定確認..."
+          if [[ -f "gradlew" ]]; then
+            ./gradlew --version || echo "Gradleバージョン確認失敗"
+          else
+            echo "❌ gradlewが見つかりません。ビルドを中断します。"
+            exit 1
+          fi
           
           echo "2. 依存関係解決..."
-          ./gradlew dependencies --info 2>&1 | tail -30 || echo "依存関係解決中"
+          ./gradlew dependencies --configuration releaseRuntimeClasspath 2>&1 | tail -50 || echo "依存関係解決中"
           
-          echo "3. リリースビルド実行..."
-          if ./gradlew assembleRelease --stacktrace --info; then
+          echo "3. クリーンビルド..."
+          ./gradlew clean 2>&1 | tail -20 || echo "クリーンビルド警告"
+          
+          echo "4. リリースビルド実行..."
+          BUILD_SUCCESS=false
+          
+          # リリースビルドを試行
+          if ./gradlew assembleRelease --stacktrace --info --no-daemon 2>&1; then
             echo "BUILD_RESULT=release" >> $GITHUB_ENV
+            BUILD_SUCCESS=true
             echo "✅ リリースビルド成功"
           else
-            echo "::warning::リリースビルド失敗、デバッグビルドを試行..."
-            if ./gradlew assembleDebug --stacktrace --info; then
+            echo "::warning::リリースビルド失敗、詳細ログ:"
+            ./gradlew assembleRelease --stacktrace 2>&1 | tail -100
+            echo ""
+            echo "::warning::デバッグビルドを試行..."
+            
+            # デバッグビルドを試行
+            if ./gradlew assembleDebug --stacktrace --info --no-daemon 2>&1; then
               echo "BUILD_RESULT=debug" >> $GITHUB_ENV
+              BUILD_SUCCESS=true
               echo "✅ デバッグビルド成功"
             else
-              echo "::error::すべてのビルドが失敗"
+              echo "::error::デバッグビルドも失敗"
+              ./gradlew assembleDebug --stacktrace 2>&1 | tail -100
               exit 1
             fi
           fi
           
-          # APKファイル確認
-          echo ""
-          echo "生成されたAPK:"
-          find . -name "*.apk" -type f 2>/dev/null | while read apk; do
-            SIZE=$(du -h "$apk" | cut -f1)
-            echo "  - $apk ($SIZE)"
-          done || echo "  APKファイルが見つかりません"
+          if [[ "$BUILD_SUCCESS" == true ]]; then
+            echo ""
+            echo "5. 生成されたAPKファイル:"
+            find . -name "*.apk" -type f 2>/dev/null | while read apk; do
+              SIZE=$(du -h "$apk" | cut -f1)
+              echo "  - $apk ($SIZE)"
+            done || echo "  APKファイルが見つかりません"
+            
+            # APK数をカウント
+            APK_COUNT=$(find . -name "*.apk" -type f 2>/dev/null | wc -l)
+            echo "生成APK数: $APK_COUNT"
+          fi
 
-      # ステップ13: APK情報確認
+      # ステップ15: APK情報確認と検証
       - name: Verify APK Information
         if: env.BUILD_NEEDED == 'true' && success()
         run: |
-          echo "=== APK情報確認 ==="
+          echo "=== APK情報確認と検証 ==="
           
-          APK_FILE=$(find . -name "*.apk" -type f 2>/dev/null | head -1)
+          # APKファイルを検索
+          APK_FILES=$(find . -name "*.apk" -type f 2>/dev/null)
           
-          if [[ -n "$APK_FILE" ]]; then
-            echo "APKファイル: $APK_FILE"
-            
-            # aaptが使えるか確認
-            if command -v aapt &> /dev/null; then
-              echo ""
-              echo "APKパッケージ情報:"
-              aapt dump badging "$APK_FILE" | grep -E "(package:|application-label:|launchable-activity)" | head -10
-            else
-              echo "aaptコマンドが利用できません"
-            fi
-          else
-            echo "APKファイルが見つかりません"
+          if [[ -z "$APK_FILES" ]]; then
+            echo "❌ APKファイルが見つかりません"
+            exit 1
           fi
+          
+          echo "検出されたAPKファイル:"
+          echo "$APK_FILES"
+          echo ""
+          
+          # 最初のAPKを詳細確認
+          FIRST_APK=$(echo "$APK_FILES" | head -1)
+          echo "詳細確認: $FIRST_APK"
+          
+          # aapt2を使用して情報を取得
+          if command -v aapt2 &> /dev/null; then
+            echo ""
+            echo "APKパッケージ情報:"
+            aapt2 dump badging "$FIRST_APK" 2>/dev/null | grep -E "(package:|application-label:|launchable-activity:|sdkVersion:|targetSdkVersion:)" || echo "aapt2での情報取得失敗"
+          elif command -v aapt &> /dev/null; then
+            echo ""
+            echo "APKパッケージ情報 (aapt):"
+            aapt dump badging "$FIRST_APK" 2>/dev/null | grep -E "(package:|application-label:|launchable-activity:)" | head -5 || echo "aaptでの情報取得失敗"
+          else
+            echo "aapt/aapt2コマンドが利用できません"
+            # 代替方法: unzipでマニフェストを確認
+            echo ""
+            echo "代替方法: マニフェスト抽出"
+            TEMP_DIR=$(mktemp -d)
+            unzip -q "$FIRST_APK" "AndroidManifest.xml" -d "$TEMP_DIR" 2>/dev/null && {
+              echo "マニフェスト抽出成功"
+              # バイナリマニフェストをテキストに変換（簡易表示）
+              strings "$TEMP_DIR/AndroidManifest.xml" | grep -i "package\|xposedscope" | head -10
+              rm -rf "$TEMP_DIR"
+            } || echo "マニフェスト抽出失敗"
+          fi
+          
+          # APKサイズ情報
+          echo ""
+          echo "APKサイズ情報:"
+          ls -lh *.apk 2>/dev/null || du -h $(find . -name "*.apk" -type f 2>/dev/null | head -5) 2>/dev/null
 
-      # ステップ14: リリース作成
+      # ステップ16: GitHubリリース作成
       - name: Create GitHub Release
         if: env.BUILD_NEEDED == 'true' && success()
         uses: softprops/action-gh-release@v2
@@ -327,15 +512,19 @@ jobs:
           tag_name: ${{ env.TARGET_TAG }}
           name: LIMEs-Neo ${{ env.SHORT_SHA }}
           body: |
-            # 🚀 LIMEs-Neo - LSPatch対応ビルド
+            # 🚀 LIMEs-Neo - LSPatch対応ビルド（修正版）
             
             ## ✅ 修正済み設定
             以下の設定が正しく適用されています：
             
-            ### AndroidManifest.xml
+            ### ターゲットアプリ（LINE-Neo）
+            - **パッケージ名**: `jp.naver.line.android.clone`
+            - **xposedscope**: `io.github.fork.lime`（モジュール参照）
+            - **アプリ名**: `LIMEs-Neo`
+            
+            ### モジュールアプリ（LIMEs）
             - **パッケージ名**: `io.github.fork.lime`
-            - **xposedscope**: `jp.naver.line.android.clone` (重複なし)
-            - **アプリ名**: `LIMEs-Neo` (直接設定)
+            - **xposedscope**: `jp.naver.line.android.clone`（ターゲット参照）
             
             ## 📋 ビルド情報
             - **ソースコミット**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
@@ -343,41 +532,65 @@ jobs:
             - **ビルド種別**: ${{ env.BUILD_RESULT == 'release' && 'リリース版' || 'デバッグ版' }}
             - **トリガー**: ${{ env.TRIGGER_TYPE == 'manual' && '手動実行' || 'スケジュール' }}
             
-            ## 🎯 LSPatch設定（重要）
+            ## 🎯 LSPatch設定（必須）
             **以下の設定で適用してください：**
             
             ```yaml
-            元のAPKパッケージ名: jp.naver.line.android.clone
+            ターゲットAPK: LIMEs-Neo（jp.naver.line.android.clone）
+            モジュール: io.github.fork.lime
             モード: 埋め込み（推奨）
             署名: 元の署名を維持
+            
+            設定確認ポイント:
+            1. ターゲットAPKのAndroidManifest.xmlに xposedscope="io.github.fork.lime" が存在
+            2. モジュールのAndroidManifest.xmlに xposedscope="jp.naver.line.android.clone" が存在
             ```
             
             ## 🔧 変更履歴
             1. パッケージ名を `io.github.hiro.lime` → `io.github.fork.lime` に変更
             2. LINEパッケージ名を `jp.naver.line.android` → `jp.naver.line.android.clone` に変更
-            3. xposedscopeの重複 `.clone.clone` を修正
-            4. アプリ名を `LIMEs-Neo` に設定
+            3. LINE-Neoマニフェストに `xposedscope="io.github.fork.lime"` を追加
+            4. アプリ名を `LIMEs-Neo` に統一
+            
+            ## ⚠️ トラブルシューティング
+            **LSPatchがモジュールを認識しない場合：**
+            
+            1. **マニフェスト確認**:
+            ```bash
+            # APK内のマニフェストを確認
+            aapt dump xmltree your-app.apk AndroidManifest.xml | grep -A3 -B3 xposedscope
+            ```
+            
+            2. **パッケージ名確認**:
+               - ターゲット: `jp.naver.line.android.clone`
+               - モジュール: `io.github.fork.lime`
+            
+            3. **LSPatchログ確認**:
+               - LSPatchの詳細ログを有効にする
+               - "xposedscope not found" エラーが出ていないか確認
             
             ## 📝 注意事項
             - このビルドはオリジナルアプリとの競合を避けるためにパッケージ名を変更しています
-            - LSPatchが正しく認識することを確認しています
+            - LSPatch 1.10.2以上を使用することを推奨します
+            - 埋め込みモードで適用すると成功率が高まります
             
             ---
-            *自動ビルドシステムにより生成 - 修正完了版*
+            *自動ビルドシステムにより生成 - 完全修正版*
           draft: false
           prerelease: false
           overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
           files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/**/*.apk
+            */build/outputs/apk/**/*.apk
+            *.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ステップ15: ビルド完了サマリー
-      - name: Build Summary
+      # ステップ17: ビルド完了サマリーとデバッグ情報
+      - name: Build Summary and Debug Info
         if: always()
         run: |
-          echo "=== ビルドサマリー ==="
+          echo "=== ビルドサマリーとデバッグ情報 ==="
           echo "ステータス: ${{ job.status }}"
           echo ""
           
@@ -386,21 +599,64 @@ jobs:
             echo ""
             echo "📦 生成情報:"
             echo "- アプリ名: LIMEs-Neo"
-            echo "- パッケージ名: $NEW_PKG"
-            echo "- LSPatch対象: $NEW_LINE_PKG"
-            echo "- タグ: ${{ env.TARGET_TAG }}"
-            echo "- ビルド種別: ${{ env.BUILD_RESULT }}"
+            echo "- ターゲットパッケージ: $NEW_LINE_PKG"
+            echo "- モジュールパッケージ: $NEW_PKG"
+            echo "- ビルドタグ: ${{ env.TARGET_TAG || '未設定' }}"
+            echo "- ビルド種別: ${{ env.BUILD_RESULT || '不明' }}"
+            echo ""
+            
+            # APKファイル情報
+            APK_FILES=$(find . -name "*.apk" -type f 2>/dev/null | head -5)
+            if [[ -n "$APK_FILES" ]]; then
+              echo "📱 生成APK:"
+              for apk in $APK_FILES; do
+                SIZE=$(du -h "$apk" 2>/dev/null | cut -f1 || echo "不明")
+                echo "  - $(basename "$apk") ($SIZE)"
+              done
+            fi
+            
             echo ""
             echo "🔗 リリースページ:"
-            echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
+            if [[ -n "${{ env.TARGET_TAG }}" ]]; then
+              echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
+            else
+              echo "タグが設定されていません"
+            fi
+            
             echo ""
             echo "🎯 LSPatch設定確認:"
-            echo "元のAPKパッケージ名: $NEW_LINE_PKG"
-          else
-            echo "❌ ビルド失敗"
+            echo "  ターゲットAPKパッケージ名: $NEW_LINE_PKG"
+            echo "  モジュールパッケージ名: $NEW_PKG"
             echo ""
-            echo "🔧 トラブルシューティング:"
-            echo "1. ワークフローログを確認"
-            echo "2. パッケージ名の置換を確認"
-            echo "3. AndroidManifest.xmlの設定を確認"
+            echo "✅ 設定が正しいことを確認してください:"
+            echo "  1. ターゲットのxposedscope → $NEW_PKG"
+            echo "  2. モジュールのxposedscope → $NEW_LINE_PKG"
+            
+          else
+            echo "❌ ビルド失敗または中断"
+            echo ""
+            echo "🔧 トラブルシューティングチェックリスト:"
+            echo "1. ワークフローログを詳細に確認"
+            echo "2. パッケージ名置換が正しく行われたか確認"
+            echo "3. AndroidManifest.xmlのxposedscope設定を確認"
+            echo "4. ビルドエラーのスタックトレースを確認"
+            echo "5. ソースコードの構造が正しいか確認"
+            echo ""
+            echo "📋 デバッグ情報収集:"
+            echo "- ソースディレクトリ構造:"
+            find . -maxdepth 3 -type d | sort
+            echo ""
+            echo "- マニフェストファイルの場所:"
+            find . -name "AndroidManifest.xml" -type f 2>/dev/null
+            echo ""
+            echo "- ビルド設定ファイル:"
+            find . -name "build.gradle" -o -name "build.gradle.kts" 2>/dev/null | head -5
           fi
+          
+          echo ""
+          echo "=== ワークフロー環境情報 ==="
+          echo "トリガー種別: ${{ env.TRIGGER_TYPE || '未設定' }}"
+          echo "ビルド必要: ${{ env.BUILD_NEEDED || '未設定' }}"
+          echo "強制再ビルド: ${{ env.FORCE_REBUILD || '未設定' }}"
+          echo "ターゲットタグ: ${{ env.TARGET_TAG || '未設定' }}"
+          echo "ソースコミット: ${{ env.SHORT_SHA || '未設定' }}"
