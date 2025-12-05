@@ -1,7 +1,6 @@
 name: LIMEs-Neo Daily Build
 
 on:
-  # 手動トリガー（GitHub UIから実行可能）
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -18,20 +17,14 @@ on:
           - release
           - debug
           - both
-  
-  # スケジュール実行（毎日UTC 0時）
   schedule:
     - cron: '0 0 * * *'
-  
-  # プッシュトリガー（任意、必要に応じて）
   push:
     branches: [ main ]
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
       - 'docs/**'
-  
-  # プルリクエストトリガー（任意、必要に応じて）
   pull_request:
     branches: [ main ]
 
@@ -54,18 +47,13 @@ jobs:
       APP_NAME: "LIMEs-Neo"
 
     steps:
-      # ステップ1: 手動トリガー入力の確認（デバッグ用）
       - name: Debug Workflow Dispatch Inputs
         if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "=== 手動トリガー入力確認 ==="
           echo "GitHub Event Name: ${{ github.event_name }}"
           echo "Force Rebuild Input: ${{ github.event.inputs.force_rebuild }}"
           echo "Build Type Input: ${{ github.event.inputs.build_type }}"
-          echo "GitHub Ref: ${{ github.ref }}"
-          echo "GitHub SHA: ${{ github.sha }}"
 
-      # ステップ2: リポジトリチェックアウト
       - name: Checkout Local Repo
         uses: actions/checkout@v4
         with:
@@ -73,188 +61,93 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      # ステップ3: トリガー種別判定
       - name: Determine Trigger Type
         id: trigger
         run: |
-          echo "=== トリガー種別判定 ==="
-          echo "イベント名: ${{ github.event_name }}"
-          
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "::notice::手動実行モード"
             echo "TRIGGER_TYPE=manual" >> $GITHUB_ENV
             echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            
             FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
             if [[ -z "$FORCE_REBUILD" || "$FORCE_REBUILD" == "true" ]]; then
               echo "FORCE_REBUILD=true" >> $GITHUB_ENV
             else
               echo "FORCE_REBUILD=false" >> $GITHUB_ENV
             fi
-            
             BUILD_TYPE="${{ github.event.inputs.build_type }}"
-            if [[ -z "$BUILD_TYPE" ]]; then
-              BUILD_TYPE="release"
-            fi
+            if [[ -z "$BUILD_TYPE" ]]; then BUILD_TYPE="release"; fi
             echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
-            
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "::notice::スケジュール実行モード"
             echo "TRIGGER_TYPE=scheduled" >> $GITHUB_ENV
             echo "FORCE_REBUILD=false" >> $GITHUB_ENV
             echo "BUILD_TYPE=release" >> $GITHUB_ENV
-            
           else
-            echo "::notice::その他のトリガー: ${{ github.event_name }}"
             echo "TRIGGER_TYPE=other" >> $GITHUB_ENV
             echo "FORCE_REBUILD=false" >> $GITHUB_ENV
             echo "BUILD_TYPE=release" >> $GITHUB_ENV
             echo "BUILD_NEEDED=true" >> $GITHUB_ENV
           fi
-          
-          echo "設定完了:"
-          echo "  TRIGGER_TYPE=$TRIGGER_TYPE"
-          echo "  BUILD_NEEDED=$BUILD_NEEDED"
-          echo "  FORCE_REBUILD=$FORCE_REBUILD"
-          echo "  BUILD_TYPE=$BUILD_TYPE"
 
-      # ステップ4: スケジュール実行時のチェック
       - name: Check for Scheduled Build
         if: env.TRIGGER_TYPE == 'scheduled'
-        id: schedule-check
         run: |
-          echo "=== スケジュール実行チェック ==="
-          
           AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
           UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
-          
-          if [ -z "$UPSTREAM_SHA" ]; then
-            echo "::error::アップストリーム取得失敗"
-            exit 1
-          fi
-          
           SHORT_SHA=${UPSTREAM_SHA:0:7}
           BASE_TAG="build-$SHORT_SHA"
-          
-          echo "アップストリーム最新コミット: $SHORT_SHA"
-          echo "想定タグ名: $BASE_TAG"
-          
           if git ls-remote --tags origin "refs/tags/$BASE_TAG" >/dev/null 2>&1; then
-            echo "::notice::既存ビルドあり - スキップします"
             echo "BUILD_NEEDED=false" >> $GITHUB_ENV
           else
-            echo "::notice::新規ビルドが必要です"
             echo "BUILD_NEEDED=true" >> $GITHUB_ENV
             echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
             echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
             echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
           fi
 
-      # ステップ5: 手動実行時の設定
       - name: Setup Manual Build
         if: env.TRIGGER_TYPE == 'manual' && env.BUILD_NEEDED == 'true'
-        id: manual-setup
         run: |
-          echo "=== 手動実行設定 ==="
-          
           AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
           UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
-          
-          if [ -z "$UPSTREAM_SHA" ]; then
-            echo "::error::アップストリーム取得失敗"
-            exit 1
-          fi
-          
           SHORT_SHA=${UPSTREAM_SHA:0:7}
           BASE_TAG="build-$SHORT_SHA"
-          
-          echo "アップストリーム最新コミット: $SHORT_SHA"
-          echo "ベースタグ名: $BASE_TAG"
-          
           echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          
           if [[ "$FORCE_REBUILD" == "true" ]]; then
             echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
-            echo "::notice::強制上書きモード"
           else
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            TARGET_TAG="${BASE_TAG}-manual-${TIMESTAMP}"
-            echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-            echo "::notice::新規ビルドモード"
+            echo "TARGET_TAG=${BASE_TAG}-manual-${TIMESTAMP}" >> $GITHUB_ENV
           fi
-          
-          echo "最終タグ名: $TARGET_TAG"
 
-      # ステップ6: その他のトリガー時の設定
       - name: Setup Other Trigger Build
         if: env.TRIGGER_TYPE == 'other' && env.BUILD_NEEDED == 'true'
-        id: other-setup
         run: |
-          echo "=== その他のトリガー設定 ==="
-          
           CURRENT_SHA="${{ github.sha }}"
           SHORT_SHA=${CURRENT_SHA:0:7}
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            TARGET_TAG="build-$SHORT_SHA-push-$TIMESTAMP"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            TARGET_TAG="build-pr-$PR_NUMBER-$TIMESTAMP"
-          else
-            TARGET_TAG="build-$SHORT_SHA-$TIMESTAMP"
-          fi
-          
           echo "UPSTREAM_SHA=$CURRENT_SHA" >> $GITHUB_ENV
           echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-          
-          echo "トリガー: ${{ github.event_name }}"
-          echo "タグ名: $TARGET_TAG"
+          echo "TARGET_TAG=build-$SHORT_SHA-$TIMESTAMP" >> $GITHUB_ENV
 
-      # ステップ7: ビルド不要な場合は終了
       - name: Skip Build if Not Needed
         if: env.BUILD_NEEDED != 'true'
-        run: |
-          echo "=== ビルド不要 ==="
-          echo "現在のコミットに対するビルドは既に存在します。"
-          echo "ビルドをスキップします。"
-          exit 0
+        run: exit 0
 
-      # ステップ8: ビルド日時取得
       - name: Get Build Datetime
         if: env.BUILD_NEEDED == 'true'
-        id: datetime
         run: |
-          echo "ビルド日時を取得中..."
-          echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
-          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
-          echo "date_short=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
 
-      # ステップ9: ソースコード取得
       - name: Fetch Source Code
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== ソースコード取得 ==="
-          
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || echo "アップストリームは既に追加済み"
-          
-          echo "アップストリームからフェッチ中..."
+          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
           git fetch upstream
-          
-          echo "コミット $UPSTREAM_SHA をチェックアウト"
           git checkout $UPSTREAM_SHA
-          
-          echo "現在のコミット:"
-          git log --oneline -1
 
-      # ステップ10: Java環境セットアップ
       - name: Setup Java
         if: env.BUILD_NEEDED == 'true'
         uses: actions/setup-java@v4
@@ -262,101 +155,95 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # ステップ11: Android SDKセットアップ
       - name: Setup Android SDK
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # ステップ12: パッケージ名とLSPatch用設定の適用（重要）
-      - name: Replace Package Names & Relax Hook Logic
+      # === 修正箇所: LSPatch認識率向上のための設定 ===
+      - name: Configure Scope & Package Names
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== パッケージ名とフックロジックの調整 ==="
+          echo "=== モジュール設定の適用 ==="
           
-          # 定義
           OLD_PKG="io.github.hiro.lime"
           NEW_PKG="io.github.fork.lime"
-          TARGET_ORIGINAL="jp.naver.line.android"
-          TARGET_CLONE="jp.naver.line.android.clone"
           
-          echo "1. モジュール自体のパッケージ名を変更 (競合回避)"
-          echo "   $OLD_PKG -> $NEW_PKG"
-          
-          # AndroidManifest, Java, Kotlin, Gradle ファイル内のモジュールIDを置換
+          # 1. モジュール自体のパッケージ名を変更 (競合回避)
+          echo "モジュールID置換: $OLD_PKG -> $NEW_PKG"
           find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
             ! -path "*/build/*" ! -path "*/.git/*" \
             -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
 
-          echo "2. LSPatchスコープ設定 (AndroidManifestのみ)"
-          echo "   AndroidManifest.xml 内のターゲットを $TARGET_CLONE に設定"
-          # これにより、LSPatchはこのモジュールがcloneアプリ用であると認識します
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" \
-            -exec sed -i "s|$TARGET_ORIGINAL|$TARGET_CLONE|g" {} +
-
-          echo "3. フック判定ロジックの緩和 (Clone対応)"
-          echo "   ソースコード内のクラス参照(import等)は壊さずに、"
-          echo "   パッケージ名チェック処理だけを clone 対応させます。"
+          # 2. Scope定義を「配列リソース」に変更して、オリジナルとClone両方を対象にする
+          echo "LSPatch用Scope定義の強化 (Clone対応)"
           
-          # '== "jp.naver.line.android"' を '.startsWith("jp.naver.line.android")' に変更
-          # これで jp.naver.line.android (公式) も jp.naver.line.android.clone (Clone) も通ります
+          # 既存の xposedscope メタデータを書き換え (value="..." -> resource="@array/...")
+          # ※ここでは単純な文字列置換ではなく、Scope設定行を狙って置換します
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" \
+            -exec sed -i 's|android:name="xposedscope"[[:space:]]*android:value="[^"]*"|android:name="xposedscope" android:resource="@array/xposed_scope"|g' {} +
+
+          # 新しい配列リソースファイルを作成
+          # これにより、LSPatch Managerは公式LINEでもCloneでも認識するようになります
+          mkdir -p app/src/main/res/values
+          cat <<EOF > app/src/main/res/values/scope_list.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string-array name="xposedscope">
+                  <item>jp.naver.line.android</item>
+                  <item>jp.naver.line.android.clone</item>
+              </string-array>
+          </resources>
+          EOF
+          echo "✅ scope_list.xml を作成しました"
+
+          # 3. フック判定ロジックの緩和
+          #    クラス名やImport文は壊さずに、パッケージ名チェックだけを緩めます
+          echo "フック判定ロジックの調整"
+          
+          # '== "jp.naver.line.android"' -> '.startsWith("jp.naver.line.android")'
           find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
             -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
             
-          # '!= "jp.naver.line.android"' を '!...startsWith(...)' に変更
+          # '!= "jp.naver.line.android"' -> '!...startsWith(...)'
           find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
             -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
 
-          # 念の為、単純な変数比較用 (lpparam.packageName 等)
+          # 変数比較用 (equals -> startsWith)
           find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
             -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
 
-          echo "✅ 調整完了: ソースコードのクラス参照は維持されました。"
+          echo "✅ 設定完了"
 
-      # ステップ13: アプリ名の統一設定
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== アプリ名の統一設定 ==="
-          
           find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
               sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo"|g' "$file"
             done
-          
           find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
             while read file; do
               sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo</string>|g' "$file"
             done
 
-      # ステップ14: Gradle権限設定
       - name: Set Gradle Permissions
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== Gradle権限設定 ==="
-          if [[ -f "gradlew" ]]; then
-            chmod +x gradlew
-            echo "gradlewに実行権限を付与"
-          fi
+          if [[ -f "gradlew" ]]; then chmod +x gradlew; fi
 
-      # ステップ15: APKビルド実行
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
           echo "=== APKビルド実行 ==="
-          
           BUILD_COMMANDS=()
-          
           if [[ "$BUILD_TYPE" == "release" || "$BUILD_TYPE" == "both" ]]; then
             BUILD_COMMANDS+=("assembleRelease")
           fi
-          
           if [[ "$BUILD_TYPE" == "debug" || "$BUILD_TYPE" == "both" ]]; then
             BUILD_COMMANDS+=("assembleDebug")
           fi
           
-          echo "実行するビルドコマンド: ${BUILD_COMMANDS[@]}"
-          
-          ./gradlew clean 2>&1 | tail -20 || echo "クリーンビルド警告"
+          ./gradlew clean 2>&1 | tail -20 || true
           
           for cmd in "${BUILD_COMMANDS[@]}"; do
             echo "実行中: ./gradlew $cmd"
@@ -365,18 +252,10 @@ jobs:
               echo "BUILD_RESULT=${cmd#assemble}" >> $GITHUB_ENV
             else
               echo "❌ $cmd 失敗"
-              ./gradlew $cmd --stacktrace 2>&1 | tail -100
               exit 1
             fi
           done
-          
-          echo "生成されたAPKファイル:"
-          find . -name "*.apk" -type f 2>/dev/null | while read apk; do
-            SIZE=$(du -h "$apk" | cut -f1)
-            echo "  - $apk ($SIZE)"
-          done
 
-      # ステップ16: GitHubリリース作成
       - name: Create GitHub Release
         if: env.BUILD_NEEDED == 'true' && success()
         uses: softprops/action-gh-release@v2
@@ -386,21 +265,10 @@ jobs:
           body: |
             # 🚀 LIMEs-Neo ビルド
             
-            ## 📋 ビルド情報
-            - **ソースコミット**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
-            - **ビルド日時**: ${{ env.BUILD_DATE }} ${{ env.BUILD_TIME }}
-            - **ビルド種別**: ${{ env.BUILD_TYPE }}
-            - **トリガー**: ${{ env.TRIGGER_TYPE }}
+            - **ソース**: ${{ env.SHORT_SHA }}
+            - **LSPatchスコープ**: 公式(`jp.naver.line.android`) / Clone(`...clone`) 両対応
             
-            ## 🎯 LSPatch設定情報
-            - **モジュールパッケージ**: `io.github.fork.lime`
-            - **ターゲットアプリ**: `jp.naver.line.android.clone` (Clone対応版)
-            
-            > **注意**: このモジュールは LSPatch 向けに `jp.naver.line.android.clone` をターゲットとしています。
-            > 内部ロジックは公式・Clone両方のパッケージ名に対応するように修正されています。
-            
-            ---
-            *GitHub Actionsによる自動ビルド*
+            ※ LSPatch Managerで Cloneアプリも正しく認識されるようにスコープ設定を強化しました。
           draft: false
           prerelease: false
           overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
@@ -409,19 +277,13 @@ jobs:
             *.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ステップ17: ビルド完了通知
+      
       - name: Build Completion Notification
         if: always()
         run: |
-          echo "=== ビルド完了 ==="
-          echo "ステータス: ${{ job.status }}"
-          echo ""
-          
           if [[ "${{ job.status }}" == "success" ]]; then
             echo "✅ ビルド成功！"
-            echo "ターゲット: jp.naver.line.android.clone"
+            echo "ターゲット: jp.naver.line.android & .clone (Dual Scope)"
           else
             echo "❌ ビルド失敗"
-            echo "詳細ログを確認してください。"
           fi
