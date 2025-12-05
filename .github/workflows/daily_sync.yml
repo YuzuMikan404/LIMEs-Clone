@@ -42,7 +42,6 @@ jobs:
     env:
       SOURCE_REPO: areteruhiro/PrtivateLIMEs
       MY_PAT: ${{ secrets.PAT }}
-      # モジュール自体の新しいパッケージ名
       NEW_PKG: "io.github.fork.lime"
       APP_NAME: "LIMEs-Neo"
 
@@ -51,8 +50,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "GitHub Event Name: ${{ github.event_name }}"
-          echo "Force Rebuild Input: ${{ github.event.inputs.force_rebuild }}"
-          echo "Build Type Input: ${{ github.event.inputs.build_type }}"
 
       - name: Checkout Local Repo
         uses: actions/checkout@v4
@@ -67,19 +64,15 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "TRIGGER_TYPE=manual" >> $GITHUB_ENV
             echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
-            if [[ -z "$FORCE_REBUILD" || "$FORCE_REBUILD" == "true" ]]; then
-              echo "FORCE_REBUILD=true" >> $GITHUB_ENV
-            else
-              echo "FORCE_REBUILD=false" >> $GITHUB_ENV
-            fi
+            echo "FORCE_REBUILD=${{ github.event.inputs.force_rebuild }}" >> $GITHUB_ENV
             BUILD_TYPE="${{ github.event.inputs.build_type }}"
-            if [[ -z "$BUILD_TYPE" ]]; then BUILD_TYPE="release"; fi
+            [[ -z "$BUILD_TYPE" ]] && BUILD_TYPE="release"
             echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
             echo "TRIGGER_TYPE=scheduled" >> $GITHUB_ENV
             echo "FORCE_REBUILD=false" >> $GITHUB_ENV
             echo "BUILD_TYPE=release" >> $GITHUB_ENV
+            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
           else
             echo "TRIGGER_TYPE=other" >> $GITHUB_ENV
             echo "FORCE_REBUILD=false" >> $GITHUB_ENV
@@ -87,57 +80,17 @@ jobs:
             echo "BUILD_NEEDED=true" >> $GITHUB_ENV
           fi
 
-      - name: Check for Scheduled Build
-        if: env.TRIGGER_TYPE == 'scheduled'
-        run: |
-          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
-          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
-          SHORT_SHA=${UPSTREAM_SHA:0:7}
-          BASE_TAG="build-$SHORT_SHA"
-          if git ls-remote --tags origin "refs/tags/$BASE_TAG" >/dev/null 2>&1; then
-            echo "BUILD_NEEDED=false" >> $GITHUB_ENV
-          else
-            echo "BUILD_NEEDED=true" >> $GITHUB_ENV
-            echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-            echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-            echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
-          fi
-
-      - name: Setup Manual Build
-        if: env.TRIGGER_TYPE == 'manual' && env.BUILD_NEEDED == 'true'
-        run: |
-          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
-          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
-          SHORT_SHA=${UPSTREAM_SHA:0:7}
-          BASE_TAG="build-$SHORT_SHA"
-          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
-          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          if [[ "$FORCE_REBUILD" == "true" ]]; then
-            echo "TARGET_TAG=$BASE_TAG" >> $GITHUB_ENV
-          else
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            echo "TARGET_TAG=${BASE_TAG}-manual-${TIMESTAMP}" >> $GITHUB_ENV
-          fi
-
-      - name: Setup Other Trigger Build
-        if: env.TRIGGER_TYPE == 'other' && env.BUILD_NEEDED == 'true'
-        run: |
-          CURRENT_SHA="${{ github.sha }}"
-          SHORT_SHA=${CURRENT_SHA:0:7}
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          echo "UPSTREAM_SHA=$CURRENT_SHA" >> $GITHUB_ENV
-          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-          echo "TARGET_TAG=build-$SHORT_SHA-$TIMESTAMP" >> $GITHUB_ENV
-
-      - name: Skip Build if Not Needed
-        if: env.BUILD_NEEDED != 'true'
-        run: exit 0
-
       - name: Get Build Datetime
         if: env.BUILD_NEEDED == 'true'
         run: |
           echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
+          
+          # タグ名生成
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          echo "TARGET_TAG=build-${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_ENV
 
       - name: Fetch Source Code
         if: env.BUILD_NEEDED == 'true'
@@ -146,6 +99,9 @@ jobs:
           git config --global user.email "actions@github.com"
           git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || true
           git fetch upstream
+          # 最新を取得
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
           git checkout $UPSTREAM_SHA
 
       - name: Setup Java
@@ -159,60 +115,78 @@ jobs:
         if: env.BUILD_NEEDED == 'true'
         uses: android-actions/setup-android@v3
 
-      # === 修正箇所: LSPatch認識率向上のための設定 ===
-      - name: Configure Scope & Package Names
+      # === 【重要】デバッグ用：変更前の状態を保存 ===
+      - name: Save Files Before Modification (Debug)
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== モジュール設定の適用 ==="
+          mkdir -p debug_artifacts/before
+          
+          echo "保存中: AndroidManifest.xml"
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" -exec cp --parents {} debug_artifacts/before/ \;
+          
+          echo "保存中: 主要なKotlinファイル (ConstantsやHook関連)"
+          find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/before/
+
+      # === 置換処理の実行 ===
+      - name: Apply Package & Scope Changes
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          echo "=== 変更処理開始 ==="
           
           OLD_PKG="io.github.hiro.lime"
           NEW_PKG="io.github.fork.lime"
           
-          # 1. モジュール自体のパッケージ名を変更 (競合回避)
-          echo "モジュールID置換: $OLD_PKG -> $NEW_PKG"
+          # 1. モジュール自体のパッケージ名を変更
+          echo "パッケージ名置換: $OLD_PKG -> $NEW_PKG"
           find . -type f \( -name "*.xml" -o -name "*.java" -o -name "*.kt" -o -name "*.gradle" \) \
             ! -path "*/build/*" ! -path "*/.git/*" \
             -exec sed -i "s|$OLD_PKG|$NEW_PKG|g" {} +
 
-          # 2. Scope定義を「配列リソース」に変更して、オリジナルとClone両方を対象にする
-          echo "LSPatch用Scope定義の強化 (Clone対応)"
+          # 2. AndroidManifest.xml の xposedscope を強制書き換え
+          #    LSPatchがcloneアプリを認識するために必須
+          echo "AndroidManifestのスコープ修正"
+          TARGET_SCOPE="jp.naver.line.android.clone"
           
-          # 既存の xposedscope メタデータを書き換え (value="..." -> resource="@array/...")
-          # ※ここでは単純な文字列置換ではなく、Scope設定行を狙って置換します
-          find . -name "AndroidManifest.xml" ! -path "*/build/*" \
-            -exec sed -i 's|android:name="xposedscope"[[:space:]]*android:value="[^"]*"|android:name="xposedscope" android:resource="@array/xposed_scope"|g' {} +
-
-          # 新しい配列リソースファイルを作成
-          # これにより、LSPatch Managerは公式LINEでもCloneでも認識するようになります
-          mkdir -p app/src/main/res/values
-          cat <<EOF > app/src/main/res/values/scope_list.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <string-array name="xposedscope">
-                  <item>jp.naver.line.android</item>
-                  <item>jp.naver.line.android.clone</item>
-              </string-array>
-          </resources>
-          EOF
-          echo "✅ scope_list.xml を作成しました"
-
-          # 3. フック判定ロジックの緩和
-          #    クラス名やImport文は壊さずに、パッケージ名チェックだけを緩めます
-          echo "フック判定ロジックの調整"
-          
-          # '== "jp.naver.line.android"' -> '.startsWith("jp.naver.line.android")'
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-            -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" | while read manifest; do
+            echo "Processing: $manifest"
+            # 元の xposedscope 行を検索して、ターゲットの値を書き換える
+            # 注意: 元の値が jp.naver.line.android であることを前提としています
+            sed -i 's|android:value="jp.naver.line.android"|android:value="jp.naver.line.android.clone"|g' "$manifest"
             
-          # '!= "jp.naver.line.android"' -> '!...startsWith(...)'
-          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-            -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
+            # 確認用ログ
+            grep "xposedscope" "$manifest" || echo "WARNING: xposedscope not found in $manifest"
+          done
 
-          # 変数比較用 (equals -> startsWith)
+          # 3. ソースコードのロジック緩和
+          #    jp.naver.line.android (公式) と .clone (クローン) 両方で動作するように
+          echo "ソースコードの判定ロジック緩和"
+          
+          # パッケージ名チェックを startsWith に変更
           find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
-            -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
+             -exec sed -i 's|== "jp.naver.line.android"|.startsWith("jp.naver.line.android")|g' {} +
+             
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+             -exec sed -i 's|!= "jp.naver.line.android"|!it.packageName.startsWith("jp.naver.line.android")|g' {} +
+             
+          find . -type f \( -name "*.kt" -o -name "*.java" \) ! -path "*/build/*" \
+             -exec sed -i 's|equals("jp.naver.line.android")|startsWith("jp.naver.line.android")|g' {} +
 
-          echo "✅ 設定完了"
+          echo "=== 変更処理完了 ==="
+
+      # === 【重要】デバッグ用：変更後の状態を保存 ===
+      - name: Save Files After Modification (Debug)
+        if: env.BUILD_NEEDED == 'true'
+        run: |
+          mkdir -p debug_artifacts/after
+          
+          echo "保存中: AndroidManifest.xml"
+          find . -name "AndroidManifest.xml" ! -path "*/build/*" -exec cp --parents {} debug_artifacts/after/ \;
+          
+          echo "保存中: 主要なKotlinファイル"
+          find . -name "*.kt" ! -path "*/build/*" | head -n 20 | xargs -I {} cp --parents {} debug_artifacts/after/
+          
+          # 差分比較用のZIP作成
+          zip -r debug_files.zip debug_artifacts/
 
       - name: Unify Application Name
         if: env.BUILD_NEEDED == 'true'
@@ -234,56 +208,41 @@ jobs:
       - name: Build APK
         if: env.BUILD_NEEDED == 'true'
         run: |
-          echo "=== APKビルド実行 ==="
-          BUILD_COMMANDS=()
+          ./gradlew clean || true
+          
           if [[ "$BUILD_TYPE" == "release" || "$BUILD_TYPE" == "both" ]]; then
-            BUILD_COMMANDS+=("assembleRelease")
+            ./gradlew assembleRelease --no-daemon
           fi
           if [[ "$BUILD_TYPE" == "debug" || "$BUILD_TYPE" == "both" ]]; then
-            BUILD_COMMANDS+=("assembleDebug")
+            ./gradlew assembleDebug --no-daemon
           fi
-          
-          ./gradlew clean 2>&1 | tail -20 || true
-          
-          for cmd in "${BUILD_COMMANDS[@]}"; do
-            echo "実行中: ./gradlew $cmd"
-            if ./gradlew $cmd --stacktrace --no-daemon 2>&1; then
-              echo "✅ $cmd 成功"
-              echo "BUILD_RESULT=${cmd#assemble}" >> $GITHUB_ENV
-            else
-              echo "❌ $cmd 失敗"
-              exit 1
-            fi
-          done
 
       - name: Create GitHub Release
         if: env.BUILD_NEEDED == 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TARGET_TAG }}
-          name: LIMEs-Neo ${{ env.SHORT_SHA }} (${{ env.BUILD_DATE }})
+          name: LIMEs-Neo Debug Build ${{ env.SHORT_SHA }}
           body: |
-            # 🚀 LIMEs-Neo ビルド
+            # 🛠 Debug Build
             
-            - **ソース**: ${{ env.SHORT_SHA }}
-            - **LSPatchスコープ**: 公式(`jp.naver.line.android`) / Clone(`...clone`) 両対応
+            うまく動作しない場合のデバッグ用ビルドです。
             
-            ※ LSPatch Managerで Cloneアプリも正しく認識されるようにスコープ設定を強化しました。
+            ## 📂 デバッグ方法
+            添付されている `debug_files.zip` をダウンロード・解凍してください。
+            - `before/`: 置換前のファイル
+            - `after/`: 置換後のファイル
+            
+            これらを比較して、`AndroidManifest.xml` の `xposedscope` が正しく `jp.naver.line.android.clone` になっているか確認できます。
+            
+            ## ビルド情報
+            - Tag: ${{ env.TARGET_TAG }}
+            - Target: jp.naver.line.android.clone
           draft: false
           prerelease: false
-          overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
           files: |
             **/build/outputs/apk/**/*.apk
             *.apk
+            debug_files.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Build Completion Notification
-        if: always()
-        run: |
-          if [[ "${{ job.status }}" == "success" ]]; then
-            echo "✅ ビルド成功！"
-            echo "ターゲット: jp.naver.line.android & .clone (Dual Scope)"
-          else
-            echo "❌ ビルド失敗"
-          fi
