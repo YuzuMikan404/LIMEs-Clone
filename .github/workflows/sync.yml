@@ -275,7 +275,7 @@ jobs:
           echo ""
           echo "✅ AndroidManifest.xml修正完了"
 
-      # ステップ11: Javaファイルのパッケージ宣言修正
+      # ステップ11: Javaファイルのパッケージ宣言修正 (修正版)
       - name: Update Java Package Declarations
         run: |
           echo "=== Javaファイルのパッケージ宣言修正 ==="
@@ -287,11 +287,17 @@ jobs:
             echo "$NEW_BASE 内のJavaファイルを処理中..."
             
             find "$NEW_BASE" -name "*.java" -type f | while read java_file; do
-              # ファイルのパッケージ宣言を修正
+              # 1. パッケージ宣言の修正
               sed -i "s|^package io.github.hiro.lime|package io.github.fork.lime|g" "$java_file"
               
-              # 同じパッケージ内のインポートも修正
+              # 2. 通常のインポート修正
               sed -i "s|import io.github.hiro.lime|import io.github.fork.lime|g" "$java_file"
+              
+              # 3. staticインポートの修正 (前回漏れていた部分)
+              sed -i "s|import static io.github.hiro.lime|import static io.github.fork.lime|g" "$java_file"
+              
+              # 4. コード内での完全修飾名の修正 (BuildConfig, Rなど)
+              sed -i "s|io\.github\.hiro\.lime\.|io.github.fork.lime.|g" "$java_file"
             done
             
             echo "処理したJavaファイル数:"
@@ -390,7 +396,7 @@ jobs:
           echo ""
           echo "📊 置換統計:"
           
-          echo "1. io.github.hiro.lime の出現:"
+          echo "1. io.github.hiro.lime の出現（0であるべき）:"
           grep -r "io\.github\.hiro\.lime" . --include="*.java" --include="*.xml" --include="*.kt" \
             2>/dev/null | grep -v "/build/" | grep -v "/.git/" | wc -l || echo "0"
           
