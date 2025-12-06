@@ -1,0 +1,643 @@
+name: LIMEs-Neo Local Mode Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '既存のビルドを上書きして強制再ビルド'
+        required: false
+        default: true
+        type: boolean
+      build_type:
+        description: 'ビルドタイプ'
+        required: false
+        default: 'debug'
+        type: string
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: write
+  packages: read
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  ANDROID_HOME: /usr/local/lib/android/sdk
+
+jobs:
+  local-mode-build:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: areteruhiro/PrtivateLIMEs
+      MY_PAT: ${{ secrets.PAT }}
+      NEW_PKG: "io.github.fork.lime"
+      NEW_LINE_PKG: "jp.naver.line.android.clone"
+      APP_NAME: "LIMEs-Neo"
+
+    steps:
+      # ステップ1: リポジトリチェックアウト
+      - name: Checkout Local Repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT }}
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      # ステップ2: 手動実行設定
+      - name: Setup Manual Build
+        id: manual-setup
+        run: |
+          echo "=== ローカルモードビルド設定 ==="
+          
+          AUTH_URL="https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git"
+          UPSTREAM_SHA=$(git ls-remote "$AUTH_URL" HEAD | awk '{print $1}')
+          
+          if [ -z "$UPSTREAM_SHA" ]; then
+            echo "::error::アップストリーム取得失敗"
+            exit 1
+          fi
+          
+          SHORT_SHA=${UPSTREAM_SHA:0:7}
+          BASE_TAG="local-build-$SHORT_SHA"
+          
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          
+          FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
+          if [[ -z "$FORCE_REBUILD" || "$FORCE_REBUILD" == "true" ]]; then
+            echo "FORCE_REBUILD=true" >> $GITHUB_ENV
+          else
+            echo "FORCE_REBUILD=false" >> $GITHUB_ENV
+          fi
+          
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [[ -z "$BUILD_TYPE" ]]; then
+            BUILD_TYPE="debug"
+          fi
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
+          
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          if [[ "$FORCE_REBUILD" == "true" ]]; then
+            TARGET_TAG="${BASE_TAG}"
+          else
+            TARGET_TAG="${BASE_TAG}-${TIMESTAMP}"
+          fi
+          echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
+          
+          echo "ビルドタイプ: $BUILD_TYPE"
+          echo "タグ名: $TARGET_TAG"
+
+      # ステップ3: ビルド日時取得
+      - name: Get Build Datetime
+        id: datetime
+        run: |
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+          echo "date_short=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date +'%H:%M:%S')" >> $GITHUB_ENV
+
+      # ステップ4: ソースコード取得
+      - name: Fetch Source Code
+        run: |
+          echo "=== ソースコード取得 ==="
+          
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          git remote add upstream "https://x-access-token:${MY_PAT}@github.com/${SOURCE_REPO}.git" || echo "アップストリームは既に追加済み"
+          
+          echo "アップストリームからフェッチ中..."
+          git fetch upstream
+          
+          echo "コミット $UPSTREAM_SHA をチェックアウト"
+          git checkout $UPSTREAM_SHA
+          
+          echo "現在のコミット:"
+          git log --oneline -1
+
+      # ステップ5: Java環境セットアップ
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ステップ6: Android SDKセットアップ
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ステップ7: ソースコード構造確認（置換前）
+      - name: Inspect Original Source Structure
+        run: |
+          echo "=== 元のソースコード構造確認（置換前） ==="
+          echo ""
+          
+          echo "📁 主要ディレクトリ構造:"
+          echo "app/src/main/java/ の構造:"
+          find app/src/main/java -type d 2>/dev/null | sort
+          
+          echo ""
+          echo "📄 build.gradle の内容確認:"
+          if [[ -f "app/build.gradle" ]]; then
+            echo "=== app/build.gradle ==="
+            grep -n "applicationId\|namespace" app/build.gradle
+          fi
+          
+          echo ""
+          echo "📄 AndroidManifest.xml の内容確認:"
+          if [[ -f "app/src/main/AndroidManifest.xml" ]]; then
+            echo "=== AndroidManifest.xml ==="
+            grep -E "package=|android:name=|xposedscope" app/src/main/AndroidManifest.xml
+          fi
+          
+          echo ""
+          echo "📄 Main.java の内容確認:"
+          MAIN_JAVA=$(find . -name "Main.java" -type f ! -path "*/build/*" 2>/dev/null | head -1)
+          if [[ -n "$MAIN_JAVA" && -f "$MAIN_JAVA" ]]; then
+            echo "ファイル: $MAIN_JAVA"
+            grep -n "TARGET_PACKAGE\|package " "$MAIN_JAVA"
+          fi
+          
+          echo ""
+          echo "📊 ファイル数統計:"
+          echo "io/github/hiro/lime ディレクトリ内のファイル数:"
+          find app/src/main/java/io/github/hiro/lime -type f 2>/dev/null | wc -l || echo "ディレクトリなし"
+
+      # ステップ8: フォルダ構造変更
+      - name: Rename Source Folder Structure
+        run: |
+          echo "=== フォルダ構造変更 ==="
+          
+          OLD_BASE="app/src/main/java/io/github/hiro/lime"
+          NEW_BASE="app/src/main/java/io/github/fork/lime"
+          
+          echo "変更: $OLD_BASE → $NEW_BASE"
+          
+          # 元のディレクトリが存在するか確認
+          if [[ ! -d "$OLD_BASE" ]]; then
+            echo "エラー: 元のディレクトリが見つかりません: $OLD_BASE"
+            echo "現在の構造:"
+            find app/src/main/java -type d 2>/dev/null | sort
+            exit 1
+          fi
+          
+          # 新しいディレクトリを作成（親ディレクトリも必要に応じて）
+          mkdir -p "$(dirname "$NEW_BASE")"
+          
+          # ディレクトリの移動
+          echo "ディレクトリを移動中..."
+          mv "$OLD_BASE" "$NEW_BASE"
+          
+          echo "移動完了"
+          
+          # テストディレクトリがあればそれも移動
+          OLD_TEST="app/src/test/java/io/github/hiro/lime"
+          NEW_TEST="app/src/test/java/io/github/fork/lime"
+          
+          if [[ -d "$OLD_TEST" ]]; then
+            echo "テストディレクトリを移動: $OLD_TEST → $NEW_TEST"
+            mkdir -p "$(dirname "$NEW_TEST")"
+            mv "$OLD_TEST" "$NEW_TEST"
+          fi
+          
+          # AndroidTestディレクトリ
+          OLD_ANDROID_TEST="app/src/androidTest/java/io/github/hiro/lime"
+          NEW_ANDROID_TEST="app/src/androidTest/java/io/github/fork/lime"
+          
+          if [[ -d "$OLD_ANDROID_TEST" ]]; then
+            echo "AndroidTestディレクトリを移動: $OLD_ANDROID_TEST → $NEW_ANDROID_TEST"
+            mkdir -p "$(dirname "$NEW_ANDROID_TEST")"
+            mv "$OLD_ANDROID_TEST" "$NEW_ANDROID_TEST"
+          fi
+          
+          echo ""
+          echo "✅ フォルダ構造変更完了"
+
+      # ステップ9: build.gradleの修正
+      - name: Update Build Gradle Configuration
+        run: |
+          echo "=== build.gradleの修正 ==="
+          
+          # app/build.gradleの修正
+          if [[ -f "app/build.gradle" ]]; then
+            echo "app/build.gradleを修正中..."
+            
+            # applicationIdの置換
+            sed -i "s|applicationId \"io.github.hiro.lime\"|applicationId \"io.github.fork.lime\"|g" app/build.gradle
+            sed -i "s|applicationId 'io.github.hiro.lime'|applicationId 'io.github.fork.lime'|g" app/build.gradle
+            
+            # namespaceの置換
+            sed -i "s|namespace \"io.github.hiro.lime\"|namespace \"io.github.fork.lime\"|g" app/build.gradle
+            sed -i "s|namespace 'io.github.hiro.lime'|namespace 'io.github.fork.lime'|g" app/build.gradle
+            
+            echo "修正後のapp/build.gradleの関連行:"
+            grep -n "applicationId\|namespace" app/build.gradle
+          fi
+          
+          # プロジェクトのbuild.gradleも確認
+          if [[ -f "build.gradle" ]]; then
+            echo "プロジェクトbuild.gradle:"
+            # 必要に応じて修正
+            sed -i "s|\"io.github.hiro.lime\"|\"io.github.fork.lime\"|g" build.gradle
+          fi
+          
+          echo ""
+          echo "✅ build.gradle修正完了"
+
+      # ステップ10: AndroidManifest.xmlの修正
+      - name: Update AndroidManifest.xml
+        run: |
+          echo "=== AndroidManifest.xmlの修正 ==="
+          
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          
+          if [[ -f "$MANIFEST" ]]; then
+            echo "AndroidManifest.xmlを修正中..."
+            
+            # package属性の置換
+            sed -i "s|package=\"io.github.hiro.lime\"|package=\"io.github.fork.lime\"|g" "$MANIFEST"
+            
+            # xposedscopeの置換
+            sed -i "s|xposedscope=\"io.github.hiro.lime\"|xposedscope=\"io.github.fork.lime\"|g" "$MANIFEST"
+            sed -i "s|xposedscope=\"jp.naver.line.android\"|xposedscope=\"jp.naver.line.android.clone\"|g" "$MANIFEST"
+            
+            # android:name属性でio.github.hiro.limeを含むもの
+            sed -i "s|android:name=\"io.github.hiro.lime|android:name=\"io.github.fork.lime|g" "$MANIFEST"
+            
+            echo "修正後のAndroidManifest.xmlの関連部分:"
+            grep -E "package=|android:name=|xposedscope" "$MANIFEST"
+          else
+            echo "警告: AndroidManifest.xmlが見つかりません"
+          fi
+          
+          echo ""
+          echo "✅ AndroidManifest.xml修正完了"
+
+      # ステップ11: Javaファイルのパッケージ宣言修正
+      - name: Update Java Package Declarations
+        run: |
+          echo "=== Javaファイルのパッケージ宣言修正 ==="
+          
+          # 新しいディレクトリ内のすべてのJavaファイルのパッケージ宣言を修正
+          NEW_BASE="app/src/main/java/io/github/fork/lime"
+          
+          if [[ -d "$NEW_BASE" ]]; then
+            echo "$NEW_BASE 内のJavaファイルを処理中..."
+            
+            find "$NEW_BASE" -name "*.java" -type f | while read java_file; do
+              # ファイルのパッケージ宣言を修正
+              sed -i "s|^package io.github.hiro.lime|package io.github.fork.lime|g" "$java_file"
+              
+              # 同じパッケージ内のインポートも修正
+              sed -i "s|import io.github.hiro.lime|import io.github.fork.lime|g" "$java_file"
+            done
+            
+            echo "処理したJavaファイル数:"
+            find "$NEW_BASE" -name "*.java" -type f | wc -l
+          fi
+          
+          # Main.javaのTARGET_PACKAGE定数を修正
+          MAIN_JAVA=$(find "$NEW_BASE" -name "Main.java" -type f 2>/dev/null | head -1)
+          if [[ -z "$MAIN_JAVA" ]]; then
+            # ディレクトリ移動後に再度検索
+            MAIN_JAVA=$(find . -name "Main.java" -type f ! -path "*/build/*" 2>/dev/null | head -1)
+          fi
+          
+          if [[ -n "$MAIN_JAVA" && -f "$MAIN_JAVA" ]]; then
+            echo "Main.javaを修正: $MAIN_JAVA"
+            
+            # TARGET_PACKAGE定数の修正
+            sed -i "s|TARGET_PACKAGE = \"jp.naver.line.android\"|TARGET_PACKAGE = \"jp.naver.line.android.clone\"|g" "$MAIN_JAVA"
+            sed -i "s|TARGET_PACKAGE = \"io.github.hiro.lime\"|TARGET_PACKAGE = \"io.github.fork.lime\"|g" "$MAIN_JAVA"
+            
+            echo "修正後のMain.javaのTARGET_PACKAGE:"
+            grep -n "TARGET_PACKAGE" "$MAIN_JAVA"
+          fi
+          
+          echo ""
+          echo "✅ Javaファイル修正完了"
+
+      # ステップ12: アプリ名の統一設定
+      - name: Unify Application Name
+        run: |
+          echo "=== アプリ名の統一設定 ==="
+          
+          # AndroidManifest.xmlのアプリ名
+          find . -name "AndroidManifest.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              sed -i 's|android:label="[^"]*"|android:label="LIMEs-Neo (Local)"|g' "$file"
+            done
+          
+          # strings.xmlのアプリ名
+          find . -name "strings.xml" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | \
+            while read file; do
+              sed -i 's|<string name="app_name">[^<]*</string>|<string name="app_name">LIMEs-Neo (Local)</string>|g' "$file"
+            done
+          
+          echo "アプリ名を 'LIMEs-Neo (Local)' に統一"
+
+      # ステップ13: 置換後の構造確認
+      - name: Verify Replaced Source Structure
+        run: |
+          echo "=== 置換後のソースコード構造確認 ==="
+          echo ""
+          
+          echo "📁 ディレクトリ構造（主要部分）:"
+          find app/src/main/java -type d 2>/dev/null | sort | head -20
+          
+          echo ""
+          echo "📄 AndroidManifest.xml のパッケージ確認:"
+          if [[ -f "app/src/main/AndroidManifest.xml" ]]; then
+            echo "=== app/src/main/AndroidManifest.xml ==="
+            grep -E "(package=|android:name=|xposedscope)" app/src/main/AndroidManifest.xml
+          fi
+          
+          echo ""
+          echo "📄 build.gradle の設定確認:"
+          if [[ -f "app/build.gradle" ]]; then
+            echo "=== app/build.gradle ==="
+            grep -n "applicationId\|namespace" app/build.gradle
+          fi
+          
+          echo ""
+          echo "📄 Main.java の内容確認:"
+          MAIN_JAVA=$(find . -name "Main.java" -type f ! -path "*/build/*" ! -path "*/.git/*" 2>/dev/null | head -1)
+          if [[ -n "$MAIN_JAVA" && -f "$MAIN_JAVA" ]]; then
+            echo "ファイル: $MAIN_JAVA"
+            echo "先頭20行:"
+            head -20 "$MAIN_JAVA"
+            
+            echo ""
+            echo "TARGET_PACKAGE 定義:"
+            grep -n "TARGET_PACKAGE" "$MAIN_JAVA"
+          else
+            echo "Main.java が見つかりません"
+          fi
+          
+          echo ""
+          echo "🔍 パッケージ宣言確認:"
+          find app/src/main/java/io/github/fork/lime -name "*.java" -type f 2>/dev/null | \
+            head -5 | while read file; do
+              PKG=$(grep "^package " "$file" | head -1)
+              if [[ -n "$PKG" ]]; then
+                echo "$(basename "$file"): $PKG"
+              fi
+            done
+          
+          # 置換の影響範囲を確認
+          echo ""
+          echo "📊 置換統計:"
+          
+          echo "1. io.github.hiro.lime の出現:"
+          grep -r "io\.github\.hiro\.lime" . --include="*.java" --include="*.xml" --include="*.kt" \
+            2>/dev/null | grep -v "/build/" | grep -v "/.git/" | wc -l || echo "0"
+          
+          echo "2. io.github.fork.lime の出現:"
+          grep -r "io\.github\.fork\.lime" . --include="*.java" --include="*.xml" --include="*.kt" \
+            2>/dev/null | grep -v "/build/" | grep -v "/.git/" | wc -l || echo "0"
+          
+          echo "3. jp.naver.line.android の出現:"
+          grep -r "jp\.naver\.line\.android" . --include="*.java" --include="*.xml" --include="*.kt" \
+            2>/dev/null | grep -v "/build/" | grep -v "/.git/" | wc -l || echo "0"
+
+      # ステップ14: Gradle権限設定
+      - name: Set Gradle Permissions
+        run: |
+          echo "=== Gradle権限設定 ==="
+          if [[ -f "gradlew" ]]; then
+            chmod +x gradlew
+            echo "gradlewに実行権限を付与"
+          fi
+
+      # ステップ15: APKビルド実行
+      - name: Build APK for Local Mode
+        run: |
+          echo "=== ローカルモード用APKビルド実行 ==="
+          
+          # クリーンビルド
+          echo "クリーンビルドを実行..."
+          ./gradlew clean 2>&1 | tail -30
+          
+          # ビルド実行
+          if [[ "$BUILD_TYPE" == "release" ]]; then
+            echo "リリースビルドを実行..."
+            BUILD_COMMAND="assembleRelease"
+          else
+            echo "デバッグビルドを実行..."
+            BUILD_COMMAND="assembleDebug"
+          fi
+          
+          echo "実行コマンド: ./gradlew $BUILD_COMMAND"
+          
+          if ./gradlew $BUILD_COMMAND --stacktrace --no-daemon 2>&1 | tee build.log; then
+            echo "✅ ビルド成功"
+          else
+            echo "❌ ビルド失敗"
+            tail -100 build.log
+            exit 1
+          fi
+          
+          # APKファイルの存在確認
+          echo "=== APKファイル確認 ==="
+          
+          if [[ "$BUILD_TYPE" == "release" ]]; then
+            APK_PATH="app/build/outputs/apk/release"
+          else
+            APK_PATH="app/build/outputs/apk/debug"
+          fi
+          
+          echo "検索パス: $APK_PATH"
+          
+          if [[ -d "$APK_PATH" ]]; then
+            echo "ディレクトリ内のファイル:"
+            ls -la "$APK_PATH/"
+            
+            APK_FILES=$(find "$APK_PATH" -name "*.apk" -type f)
+            if [[ -n "$APK_FILES" ]]; then
+              echo "✅ APKファイルを発見:"
+              echo "$APK_FILES"
+              
+              # ファイルサイズを表示
+              for apk in $APK_FILES; do
+                SIZE=$(du -h "$apk" | cut -f1)
+                echo "  - $apk ($SIZE)"
+              done
+              
+              # 環境変数にAPKパスを保存
+              echo "APK_FILES=$APK_FILES" >> $GITHUB_ENV
+            else
+              echo "❌ APKファイルが見つかりません"
+              exit 1
+            fi
+          else
+            echo "❌ APKディレクトリが存在しません: $APK_PATH"
+            echo "ビルド出力ディレクトリを検索..."
+            find . -name "*.apk" -type f 2>/dev/null | head -10
+            exit 1
+          fi
+
+      # ステップ16: APK内部構造確認
+      - name: Inspect APK Internal Structure
+        if: success() && env.APK_FILES != ''
+        run: |
+          echo "=== APK内部構造確認 ==="
+          
+          FIRST_APK=$(echo "$APK_FILES" | head -1)
+          if [[ -f "$FIRST_APK" ]]; then
+            echo "🔍 APK: $(basename "$FIRST_APK")"
+            
+            # APKの基本情報
+            echo ""
+            echo "📦 APK基本情報:"
+            if command -v apkanalyzer &> /dev/null; then
+              apkanalyzer manifest application-id "$FIRST_APK" 2>/dev/null || echo "apkanalyzer 利用不可"
+            else
+              echo "apkanalyzer がインストールされていません"
+            fi
+            
+            # AndroidManifest.xmlを抽出して確認
+            echo ""
+            echo "📄 AndroidManifest.xml 内容:"
+            UNZIP_DIR="apk_inspect"
+            mkdir -p "$UNZIP_DIR"
+            unzip -q -o "$FIRST_APK" "AndroidManifest.xml" -d "$UNZIP_DIR" 2>/dev/null
+            
+            if [[ -f "$UNZIP_DIR/AndroidManifest.xml" ]]; then
+              echo "抽出したAndroidManifest.xmlから重要な要素:"
+              
+              # stringsコマンドで簡易表示
+              echo "パッケージ名:"
+              strings "$UNZIP_DIR/AndroidManifest.xml" | grep "package=" | head -1
+              
+              echo ""
+              echo "xposedscopeの値:"
+              strings "$UNZIP_DIR/AndroidManifest.xml" | grep -i "xposedscope" | head -1
+              
+              echo ""
+              echo "その他の重要な文字列:"
+              strings "$UNZIP_DIR/AndroidManifest.xml" | grep -E "(io\.github|jp\.naver)" | head -5
+              
+              # クリーンアップ
+              rm -rf "$UNZIP_DIR"
+            else
+              echo "AndroidManifest.xml の抽出に失敗"
+            fi
+            
+            # APK内のファイル一覧
+            echo ""
+            echo "📁 APK内の主なファイル:"
+            unzip -l "$FIRST_APK" | grep -E "(\.dex$|AndroidManifest\.xml|\.so$)" | head -10
+          fi
+
+      # ステップ17: GitHubリリース作成（APK添付修正版）
+      - name: Create GitHub Release with APK
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TARGET_TAG }}
+          name: LIMEs-Neo Local Mode ${{ env.SHORT_SHA }} (${{ env.BUILD_DATE }})
+          body: |
+            # 🚀 LIMEs-Neo - ローカルモード用ビルド
+            
+            ## 📋 ビルド情報
+            - **ソースコミット**: [${{ env.SHORT_SHA }}](https://github.com/${{ env.SOURCE_REPO }}/commit/${{ env.UPSTREAM_SHA }})
+            - **ビルド日時**: ${{ env.BUILD_DATE }} ${{ env.BUILD_TIME }}
+            - **ビルド種別**: ${{ env.BUILD_TYPE }}
+            - **タグ**: ${{ env.TARGET_TAG }}
+            - **ビルド方法**: フォルダ構造変更方式
+            
+            ## 🎯 ローカルモード設定
+            **ターゲットAPK**: `jp.naver.line.android.clone` (LINE-Neo)
+            **モジュールAPK**: `io.github.fork.lime` (LIMEs-Neo)
+            **xposedscope値**: `jp.naver.line.android.clone`
+            
+            ## 🔧 変更内容
+            1. フォルダ構造変更: `io/github/hiro/lime` → `io/github/fork/lime`
+            2. build.gradleのapplicationId/namespace変更
+            3. AndroidManifest.xmlのpackage属性変更
+            4. Javaファイルのパッケージ宣言変更
+            5. Main.javaのTARGET_PACKAGE定数変更
+            
+            ## 📦 ダウンロード
+            以下のAPKファイルをダウンロードして端末にインストールしてください。
+            
+            ## 🔧 ローカルモード使用方法
+            1. **LINE-Neo** (`jp.naver.line.android.clone`) をインストール
+            2. このAPKファイルをインストール（LIMEs-Neoモジュール）
+            3. **LSPatch** アプリを開く
+            4. 「管理」→ LINE-Neoを選択
+            5. 「モジュール」→ LIMEs-Neoを有効化
+            6. LINE-Neoを再起動
+            
+            ## ⚠️ 注意事項
+            - ローカルモードでは埋め込みパッチは不要です
+            - LINE-Neoがインストール済みであることを確認
+            - モジュール有効化後は必ずアプリを再起動
+            
+            ---
+            *自動ビルド - フォルダ構造変更方式*
+          draft: false
+          prerelease: false
+          overwrite: ${{ env.FORCE_REBUILD == 'true' && true || false }}
+          files: |
+            ${{ env.APK_FILES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ステップ18: ビルド完了通知
+      - name: Build Completion Notification
+        if: always()
+        run: |
+          echo "=== ビルド完了 ==="
+          echo "ステータス: ${{ job.status }}"
+          echo ""
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ ビルド成功！"
+            echo ""
+            echo "📊 ビルドサマリー:"
+            echo "- アプリ名: LIMEs-Neo (Local)"
+            echo "- ターゲットパッケージ: $NEW_LINE_PKG"
+            echo "- モジュールパッケージ: $NEW_PKG"
+            echo "- ビルド種別: ${{ env.BUILD_TYPE }}"
+            echo "- ビルド方式: フォルダ構造変更"
+            echo "- APKファイル数: $(echo $APK_FILES | wc -w)"
+            echo "- ビルド日時: ${{ env.BUILD_DATE }} ${{ env.BUILD_TIME }}"
+            
+            # APKファイル一覧
+            echo ""
+            echo "📦 生成されたAPKファイル:"
+            for apk in $APK_FILES; do
+              if [[ -f "$apk" ]]; then
+                SIZE=$(du -h "$apk" | cut -f1)
+                echo "  - $(basename "$apk") ($SIZE)"
+              fi
+            done
+            
+            if [[ -n "${{ env.TARGET_TAG }}" ]]; then
+              echo ""
+              echo "🔗 リリースページ:"
+              echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}"
+            fi
+            
+            # 構造変更の確認
+            echo ""
+            echo "🔄 変更された構造:"
+            echo "元: io/github/hiro/lime"
+            echo "新: io/github/fork/lime"
+          else
+            echo "❌ ビルド失敗"
+            echo ""
+            echo "🔧 デバッグ情報:"
+            echo "- イベント: ${{ github.event_name }}"
+            echo "- ビルドタイプ: ${{ env.BUILD_TYPE || '不明' }}"
+            echo "- フォルダ構造変更: 実施済み"
+            
+            if [[ -f "build.log" ]]; then
+              echo ""
+              echo "📝 ビルドログのエラー:"
+              grep -i "error:" build.log | head -10 || echo "エラー箇所が見つかりません"
+            fi
+          fi
